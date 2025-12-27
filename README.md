@@ -91,7 +91,7 @@ For a full demonstration of how to run the code, please refer to the example not
 
 ### API Reference: Unified Configuration Class
 
-The `tpy5_inputs_class()` is a **unified configuration class** that controls all parameters for photometry processing, detrending, and BLS transit search:
+The `tpy5_inputs_class()` is a **unified configuration class** that controls all parameters for photometry processing, detrending, and BLS/TLS transit search:
 
 > **Note:** `gbls_inputs_class` has been deprecated and consolidated into `tpy5_inputs_class`. For backward compatibility, `gbls_inputs_class` is aliased to `tpy5_inputs_class`, but new code should use `tpy5_inputs_class` directly.
 
@@ -116,23 +116,35 @@ The `tpy5_inputs_class()` is a **unified configuration class** that controls all
 #### Stellar Parameters
 - `mstar` (float, default: 1.0): Stellar mass in solar masses
 - `rstar` (float, default: 1.0): Stellar radius in solar radii
+- `u` (list, default: [0.4804, 0.1867]): Quadratic limb-darkening
 - `teff` (float, default: 5777): Effective temperature in Kelvin
 - `logg` (float, default: 4.5): Surface gravity (log g) in cgs
 - `feh` (float, default: 0.0): Metallicity [Fe/H]
 
-#### BLS Transit Search Parameters
+#### Transit Search Parameters
 - `filename` (str, default: "filename.txt"): Lightcurve filename
 - `lcdir` (str, default: ""): Lightcurve directory path
 - `zerotime` (float, default: 0.0): Time offset for epochs
 - `freq1` (float, default: -1): Minimum search frequency in cycles/day (auto if -1)
 - `freq2` (float, default: -1): Maximum search frequency in cycles/day (auto if -1)
+- `plots` (int, default: 1): Plot mode (0=none, 1=display, 2=save+display, 3=save only)
+
+#### BLS Transit Search Parameters
 - `ofac` (float, default: 8.0): Oversampling factor for frequency grid
 - `minbin` (int, default: 5): Minimum number of bins in transit
-- `plots` (int, default: 1): Plot mode (0=none, 1=display, 2=save+display, 3=save only)
 - `multipro` (int, default: 1): Enable multiprocessing (0=single thread, 1=parallel)
 - `normalize` (str, default: "iterative_baseline"): BLS normalization method
 - `return_spectrum` (bool, default: False): Return full BLS spectrum arrays
 - `oneoverf_correction` (bool, default: True): Apply 1/f noise correction for long periods
+
+#### TLS Transit Search Parameters
+- `search_verbose` (bool, default: False): To print or not to print TLS input parameters and set transitleastsquares to verbose=True
+- `pars` (dict, default: {}): Additional parameters to feed into TLS. Overrides default settings, e.g. maximum/minimum stellar parameters
+- `arstarmin` (float, default: 1.1): Imposes an astrophysical constraint on the minimum period; if  overrides `< freq2`, overrides
+- `upbuff` (float, default: 0.2): % of stellar parameters to calculate maximum (i.e. 120%)
+- `lowbuff` (float, default: 0.8): % of stellar parameters to calculate minimum (i.e. 20%)
+- `stthres` (float, default: 0.095): threshold value for the minimum `rstar` or `mstar` before adjusting `lowbuff`
+- `stbuff` (float, default: 0.2): alternative `lowbuff` if the minimum of stellar parameters are calculated < `stthres`
 
 **Example Usage:**
 ```python
@@ -167,6 +179,7 @@ tpy5.run_polyfilter_iterative(phot, tpy5_inputs)
 # Run BLS with the same unified config
 import pytfit5.bls_cpu as gbls
 gbls_ans = gbls.bls(tpy5_inputs, phot.time, phot.flux_f)
+gtls_ans = gbls.tls(tpy5_inputs, phot.time, phot.flux_f, phot.ferr)
 ```
 
 ### Lightcurve Visualization
