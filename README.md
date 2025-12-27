@@ -10,7 +10,6 @@ This package provides tools for transit search and fitting, including Box-Least-
 *   Python 3.8+
 
 ### Installing from Source
-It is recommended to install this package in "editable" mode inside a virtual environment. This allows you to modify the source code without needing to reinstall.
 
 1.  **Clone the repository:**
     ```bash
@@ -20,7 +19,7 @@ It is recommended to install this package in "editable" mode inside a virtual en
 
 2.  **Install via pip:**
     ```bash
-    pip install -e .
+    pip install .
     ```
 
 ## Features
