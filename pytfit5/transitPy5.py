@@ -569,27 +569,38 @@ class tpy5_inputs_class:
         self.iter_sigma_threshold = 3.0  # Sigma threshold for transit detection
         self.iter_min_duration    = 0.05 # Minimum transit duration in days (~1 hour)
         self.iter_verbose        = False  # Print iteration progress and statistics
-        # BLS parameters (consolidated from gbls_inputs_class)
+
+        # Search parameters!
         self.filename = "filename.txt"  # Lightcurve filename
         self.lcdir    = ""              # Lightcurve directory
         self.zerotime = 0.0             # Time offset (e.g., for Kepler/TESS)
         self.freq1    = -1              # Minimum frequency to search [c/d] (auto if -1)
         self.freq2    = -1              # Maximum frequency to search [c/d] (auto if -1)
+        self.plots    = 1               # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
+        # BLS parameters (consolidated from gbls_inputs_class)
         self.ofac     = 8.0             # Oversampling factor
         self.nper     = 50000           # Number of periods (deprecated, auto-calculated)
         self.minbin   = 5               # Minimum number of bins in transit
-        self.plots    = 1               # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
         self.multipro = 1               # 0 = single thread, 1 = multiprocessing
         self.normalize = "iterative_baseline"  # BLS normalization: none, mad, percentile_mad, coverage_mad, iterative_baseline
         self.return_spectrum = False    # If True, return full BLS spectrum (periods, power, freqs)
         self.oneoverf_correction = True # If True, apply baseline subtraction (else leave raw)
         self.oneoverf_extrapolate = True # If True, extrapolate baseline/noise for periods > threshold
         self.oneoverf_threshold = None   # Period threshold for extrapolation (days). None = use baseline length 
-
         # Pulse search parameters
         self.pulse_min_duration_hours = 1.0
         self.pulse_max_duration_hours = 12.0
         self.pulse_bin_duration_days = None
+        # TLS search parameters
+        self.search_verbose = False        # from the transitleastsquares module plus pars check
+        self.pars = {}              # if any additional parameters are needed for tls
+        self.u = [0.4804, 0.1867]   # the default limb-darkening from transitleastsquares
+        self.transitmin = 1         # the number of minimum transits required
+        self.arstarmin = 1.1        # truncate periods violating this bound
+        self.upbuff = 0.2           # maximum mass/radius is 20% of the input
+        self.lowbuff = 0.8          # minimum mass/radius is 80% of the input
+        self.stthres = 0.095        # if values are lower than this, then:
+        self.stbuff = 0.2           # resets the lower/upper buffer to 20%
 
 class exocat_class:
     def __init__(self):

@@ -1,7 +1,10 @@
 import os
+import sys
+from pathlib import Path
+funcdir = str((Path(__file__).resolve()).parent)
 
+import pprint
 import numpy as np
-
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from matplotlib import ticker
@@ -19,11 +22,13 @@ from scipy.optimize import curve_fit
 from scipy import stats
 
 import concurrent.futures
-import os
-
 # Import tpy5_inputs_class from transitPy5
 from pytfit5.transitPy5 import tpy5_inputs_class
 from pytfit5 import period_validation as pval
+
+# Importing tls functionality
+sys.path.insert(0, f'{funcdir}')
+from transitleastsquares import main as tlsm
 
 # Backward compatibility alias (deprecated)
 gbls_inputs_class = tpy5_inputs_class
@@ -35,6 +40,7 @@ Msun    = 1.9891e30           # kg  mass of Sun
 pifac   = 1.083852140278e0    # (2pi)^(2/3)/pi
 day2sec = 86400.0             # seconds in a day
 onehour = 1.0/24.0            # one hour convected to day.
+kepfac = (2*np.pi)**2/G       # used below in the tls calculation
 
 class gbls_ans_class:
     def __init__(self):
@@ -238,7 +244,7 @@ def makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, sn
         if i == 0:
             # Top panel : BLS spectrum
             xlabel = "Period (days)"
-            ylabel = "BLS Power"
+            ylabel = "Power"
         
             x = periods
             y = power
@@ -1761,3 +1767,105 @@ def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
         
     return final_ans
 
+## ADDING THE TLS FUNCTIONALITIES
+def minstpars(runpar, starr):
+    '''
+    Imposing a minimum threshold on our values to prevent a duration grid
+    that goes to values which are too small. Determined by pipeline parameters.
+    '''
+    minarr = (1-runpar.lowbuff) * starr
+    minarr[minarr < runpar.stthres] = (1-runpar.stbuff) * starr[minarr < runpar.stthres]
+    return tuple(minarr)
+
+def setgridbounds(runpar, t):
+    '''
+    Considering if there is already a minimum and maximum frequency set 
+    or if we are using the default parameters. Then, sanity check with a/rstar.
+    Setting the lower frequency for TLS by the number of transits. 
+    '''
+    # Setting the minimum period if the frequency is set.
+    pars = (runpar.pars).copy()
+    if runpar.freq2 <= 0:
+        pars['period_min'] = 0.5
+        # runpar.freq2 = 2.0
+    else:
+        pars['period_min'] = 1/runpar.freq2
+        
+    # Checking to see if pmin > than the minimum arstarmin
+    T2 = kepfac/(runpar.mstar*Msun) * (runpar.arstarmin*runpar.rstar*Rsun)**3
+    pmin = np.sqrt(T2)/day2sec
+    if pmin > pars['period_min']:
+        pars['period_min'] = pmin
+        # runpar.freq2 = 1/pmin
+        
+    # Setting the upper bound for the transit search
+    if runpar.freq1 <= 0:
+        pars['n_transits_min'] = 2
+        # runpar.freq1 = 2.0/(np.max(t)-np.min(t))
+    else:
+        pars['n_transits_min'] = int((np.max(t)-np.min(t))*runpar.freq1)
+        if pars['n_transits_min'] < 1:
+            pars['n_transits_min'] = 1
+            
+    return pars
+    
+def getTLSDict(runpar, t):
+    '''
+    We take the general parameters for TLS and curate it for the specific RIC.
+    This is primarily with the stellar parameters, and then we check for the
+    minimum period threshold as well as consider if we need to plot.
+    '''
+
+    pars = setgridbounds(runpar, t)
+    starr = np.array([runpar.rstar, runpar.mstar])
+    pars['R_star'], pars['M_star'], pars['u'] = *starr, runpar.u    
+    pars['R_star_min'], pars['M_star_min'] = minstpars(runpar, starr)
+    pars['R_star_max'], pars['M_star_max'] = starr*(1+runpar.upbuff)
+    
+    return pars
+
+def tls(tpy5_inputs, t=np.array([0]), f=np.array([0]), dy=None):
+    '''
+    Running the TLS module and setting its parameters in the dictionary.
+    This is with the limb-darkening included, and no plot will be shown.
+    Zero-point is subtracted off.
+
+    verbose bug in tls means the keyword argument is given in the power function.
+    '''
+    if tpy5_inputs.lcdir == "":
+        filename = tpy5_inputs.filename
+    else:
+        filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
+    ## This branch hasn't yet been tested! Depends where this ends up.
+    if (t.shape[0] < 2) or (f.shape[0] < 2):
+        t, f, dy = readfile(filename)
+    
+    defaultpars = getTLSDict(tpy5_inputs, t)
+    # The direct user input of parameters will override defaults.
+    pars = {**defaultpars, **tpy5_inputs.pars}
+    t0 = t - tpy5_inputs.zerotime
+    model = tlsm.transitleastsquares(t0, f, dy=dy)
+    tlsob = model.power(**pars, verbose=tpy5_inputs.search_verbose) # running TLS
+
+    if tpy5_inputs.search_verbose:
+        pprint.pprint(pars)
+    tlsans = gbls_ans_class()
+    tlsans.epo      = tlsob.T0
+    tlsans.bper     = tlsob.period
+    tlsans.bpower   = tlsob.SDE
+    tlsans.snr      = tlsob.snr
+    tlsans.tdur     = tlsob.duration
+    tlsans.depth    = (1-tlsob.depth)
+    if tpy5_inputs.return_spectrum:
+        tlsans.periods  = tlsob.periods  # Full period array 
+        tlsans.power    = tlsob.power  # Full power array 
+        tlsans.freqs    = 1/tlsob.periods  # Full frequency array 
+
+    if tpy5_inputs.plots > 0:
+        if np.isnan(tlsob.period) or tlsob.transit_count <= 1:
+            makeplot_pulse(t, f, tlsans, np.min(t), tpy5_inputs.zerotime, filename, tpy5_inputs.plots)
+        else:
+            makeplot(tlsob.periods, tlsob.power, t, f, np.min(t), tpy5_inputs.zerotime, \
+            tlsob.T0, tlsob.period, tlsob.SDE, tlsob.snr, tlsob.duration, (1-tlsob.depth), filename, tpy5_inputs.plots)
+        
+    return tlsans
