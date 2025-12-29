@@ -28,7 +28,7 @@ from pytfit5 import period_validation as pval
 
 # Importing tls functionality
 sys.path.insert(0, f'{funcdir}')
-from transitleastsquares import main as tlsm
+from tls.transitleastsquares import main as tlsm
 
 # Backward compatibility alias (deprecated)
 gbls_inputs_class = tpy5_inputs_class
@@ -1857,8 +1857,11 @@ def tls(tpy5_inputs, t=np.array([0]), f=np.array([0]), dy=None):
     t0 = t - tpy5_inputs.zerotime
     model = tlsm.transitleastsquares(t0, f, dy=dy)
     tlsob = model.power(**pars, verbose=tpy5_inputs.search_verbose) # running TLS
-    srU, srC = np.unique(tlsob.SR, return_counts=True)
-    srflag = (srU[0] < 10**(-3)) & (srC[0] > len(tlsob.SR)/100)
+    try: # this fails if tlsob.SR is not an array
+        srU, srC = np.unique(tlsob.SR, return_counts=True)
+        srflag = (srU[0] < 10**(-3)) & (srC[0] > len(tlsob.SR)/100)
+    except: # therefore, there is an issue with our residuals
+        srflag = 1
 
     tlsans = gbls_ans_class()
     tlsans.epo      = tlsob.T0
