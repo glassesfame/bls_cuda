@@ -7,6 +7,7 @@ utils/
 depreciated/
 3288.01.h5
 .vscode/
+data/
 
 # Mac stuff
 .DS_Store

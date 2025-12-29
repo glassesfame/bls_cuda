@@ -46,6 +46,7 @@ class gbls_ans_class:
     def __init__(self):
         self.epo      = 0.0
         self.bper     = 0.0
+        self.rawper   = 0.0
         self.bpower   = -1
         self.snr      = -1
         self.tdur     = 8.0
@@ -53,6 +54,7 @@ class gbls_ans_class:
         self.periods  = None  # Full period array (if return_spectrum=True)
         self.power    = None  # Full power array (if return_spectrum=True)
         self.freqs    = None  # Full frequency array (if return_spectrum=True)
+        self.SR       = None # The signal residuals which apply for TLS
 
 #generic routine to read in files
 def readfile(filename):
@@ -818,141 +820,147 @@ def _extrapolate_noise(noise, freqs, time, width, threshold=None):
 def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode="iterative_baseline", oneoverf_correction=False, oneoverf_extrapolate=True, oneoverf_threshold=None):
 
     periods = 1/freqs # periods (days)
-
+    
     # Estimate a data-driven, duty-cycle informed median filter width.
     # Falls back to a small odd kernel if estimation fails.
-    width = _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins=nstep-1, alpha=4*ofac, min_width=nine_if_even(int(max(5, ofac*4))))
-    
+    width = _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins=nstep-1, \
+                            alpha=4*ofac, min_width=nine_if_even(int(max(5, ofac*4))))
+
     sqrtp = np.sqrt(p)
-    
+    # Sanitize: replace NaN/Inf with very negative values so they don't dominate sort
+    rawpower = np.where(np.isfinite(sqrtp), sqrtp, -1e30)
+    rawsort = np.argsort(rawpower)
+    rawper = periods[rawsort[-1]] 
     eps = 1e-12
     
     # Handle pure BLS case first (no processing needed)
     if normalize_mode == "none" and not oneoverf_correction:
         # Pure BLS spectrum with no baseline correction or normalization
-        power = sqrtp
-    # For all other cases, we need to compute baseline and/or normalization
-    elif normalize_mode == "none" and oneoverf_correction:
-        # Baseline correction but no normalization
-        # Use iterative baseline to avoid suppressing strong peaks
-        baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
-        # Apply extrapolation if enabled
-        if oneoverf_extrapolate:
-            baseline = _extrapolate_baseline(baseline, freqs, time, width, threshold=oneoverf_threshold)
-        residual = sqrtp - baseline
-        power = residual
-    elif normalize_mode == "iterative_baseline":
-        # Iteratively identify continuum by clipping strong peaks
-        # This is more robust for high-SNR signals that would bias standard methods
-        if oneoverf_correction:
-            # Apply baseline subtraction
-            iter_baseline, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
-            # Extrapolate the iterative baseline for low frequencies (if enabled)
-            if oneoverf_extrapolate:
-                iter_baseline = _extrapolate_baseline(iter_baseline, freqs, time, width, threshold=oneoverf_threshold)
-            residual_iter = sqrtp - iter_baseline
-        else:
-            # No baseline subtraction, use raw sqrtp
-            residual_iter = sqrtp
-            # Still compute peak_mask for noise estimation
-            _, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
-        
-        # Compute noise from non-peak regions only
-        if np.sum(peak_mask) > 10:
-            noise_resid = residual_iter[peak_mask]
-            mad_iter = np.median(np.abs(noise_resid - np.median(noise_resid)))
-            noise_iter = 1.4826 * mad_iter
-        else:
-            noise_iter = np.nanstd(residual_iter)
-        if not np.isfinite(noise_iter) or noise_iter <= 0:
-            noise_iter = np.nanstd(residual_iter)
-        # Create uniform noise array (no extrapolation needed - already global constant)
-        noise_arr = np.full_like(residual_iter, noise_iter)
-        power = residual_iter / (noise_arr + eps)
-    elif normalize_mode == "mad":
-        # Compute baseline for MAD normalization using iterative method
-        if oneoverf_correction:
+        power = rawpower
+        psort = rawsort
+        bper = rawper
+
+    else: # For all other cases, we need to compute baseline and/or normalization
+        if normalize_mode == "none" and oneoverf_correction:
+            # Baseline correction but no normalization
+            # Use iterative baseline to avoid suppressing strong peaks
             baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+            # Apply extrapolation if enabled
             if oneoverf_extrapolate:
                 baseline = _extrapolate_baseline(baseline, freqs, time, width, threshold=oneoverf_threshold)
             residual = sqrtp - baseline
-        else:
-            residual = sqrtp
-        # Rolling MAD around the baseline (constant window at edges)
-        local_med = _rolling_median(residual, width)
-        mad = _rolling_mad(residual - local_med, width)
-        noise = 1.4826 * mad
-        # Robust fallback: use global median for edge/low values
-        global_noise = np.nanmedian(noise[noise > eps])
-        if not np.isfinite(global_noise) or global_noise <= 0:
-            global_noise = np.nanstd(residual)
-        noise = np.maximum(noise, 0.1 * global_noise)  # floor at 10% of typical
-        # Extrapolate noise for low frequencies (if enabled)
-        if oneoverf_extrapolate:
-            noise = _extrapolate_noise(noise, freqs, time, width, threshold=oneoverf_threshold)
-        power = residual / (noise + eps)
-    elif normalize_mode == "percentile_mad":
-        # Use upper-percentile baseline and MAD of residuals (constant window at edges)
-        if oneoverf_correction:
-            perc_base = _rolling_percentile(sqrtp, width, 75)
-            # Extrapolate percentile baseline for low frequencies (if enabled)
+            power = residual
+        elif normalize_mode == "iterative_baseline":
+            # Iteratively identify continuum by clipping strong peaks
+            # This is more robust for high-SNR signals that would bias standard methods
+            if oneoverf_correction:
+                # Apply baseline subtraction
+                iter_baseline, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+                # Extrapolate the iterative baseline for low frequencies (if enabled)
+                if oneoverf_extrapolate:
+                    iter_baseline = _extrapolate_baseline(iter_baseline, freqs, time, width, threshold=oneoverf_threshold)
+                residual_iter = sqrtp - iter_baseline
+            else:
+                # No baseline subtraction, use raw sqrtp
+                residual_iter = sqrtp
+                # Still compute peak_mask for noise estimation
+                _, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+            
+            # Compute noise from non-peak regions only
+            if np.sum(peak_mask) > 10:
+                noise_resid = residual_iter[peak_mask]
+                mad_iter = np.median(np.abs(noise_resid - np.median(noise_resid)))
+                noise_iter = 1.4826 * mad_iter
+            else:
+                noise_iter = np.nanstd(residual_iter)
+            if not np.isfinite(noise_iter) or noise_iter <= 0:
+                noise_iter = np.nanstd(residual_iter)
+            # Create uniform noise array (no extrapolation needed - already global constant)
+            noise_arr = np.full_like(residual_iter, noise_iter)
+            power = residual_iter / (noise_arr + eps)
+        elif normalize_mode == "mad":
+            # Compute baseline for MAD normalization using iterative method
+            if oneoverf_correction:
+                baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+                if oneoverf_extrapolate:
+                    baseline = _extrapolate_baseline(baseline, freqs, time, width, threshold=oneoverf_threshold)
+                residual = sqrtp - baseline
+            else:
+                residual = sqrtp
+            # Rolling MAD around the baseline (constant window at edges)
+            local_med = _rolling_median(residual, width)
+            mad = _rolling_mad(residual - local_med, width)
+            noise = 1.4826 * mad
+            # Robust fallback: use global median for edge/low values
+            global_noise = np.nanmedian(noise[noise > eps])
+            if not np.isfinite(global_noise) or global_noise <= 0:
+                global_noise = np.nanstd(residual)
+            noise = np.maximum(noise, 0.1 * global_noise)  # floor at 10% of typical
+            # Extrapolate noise for low frequencies (if enabled)
             if oneoverf_extrapolate:
-                perc_base = _extrapolate_baseline(perc_base, freqs, time, width, threshold=oneoverf_threshold)
-            resid2 = sqrtp - perc_base
-        else:
-            resid2 = sqrtp
-        local_med2 = _rolling_median(resid2, width)
-        mad2 = _rolling_mad(resid2 - local_med2, width)
-        noise2 = 1.4826 * mad2
-        # Robust fallback
-        global_noise2 = np.nanmedian(noise2[noise2 > eps])
-        if not np.isfinite(global_noise2) or global_noise2 <= 0:
-            global_noise2 = np.nanstd(resid2)
-        noise2 = np.maximum(noise2, 0.1 * global_noise2)
-        # Extrapolate noise for low frequencies (if enabled)
-        if oneoverf_extrapolate:
-            noise2 = _extrapolate_noise(noise2, freqs, time, width, threshold=oneoverf_threshold)
-        power = resid2 / (noise2 + eps)
-    else:  # "coverage_mad" (default)
-        # Compute baseline for coverage_mad normalization using iterative method
-        if oneoverf_correction:
-            baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+                noise = _extrapolate_noise(noise, freqs, time, width, threshold=oneoverf_threshold)
+            power = residual / (noise + eps)
+        elif normalize_mode == "percentile_mad":
+            # Use upper-percentile baseline and MAD of residuals (constant window at edges)
+            if oneoverf_correction:
+                perc_base = _rolling_percentile(sqrtp, width, 75)
+                # Extrapolate percentile baseline for low frequencies (if enabled)
+                if oneoverf_extrapolate:
+                    perc_base = _extrapolate_baseline(perc_base, freqs, time, width, threshold=oneoverf_threshold)
+                resid2 = sqrtp - perc_base
+            else:
+                resid2 = sqrtp
+            local_med2 = _rolling_median(resid2, width)
+            mad2 = _rolling_mad(resid2 - local_med2, width)
+            noise2 = 1.4826 * mad2
+            # Robust fallback
+            global_noise2 = np.nanmedian(noise2[noise2 > eps])
+            if not np.isfinite(global_noise2) or global_noise2 <= 0:
+                global_noise2 = np.nanstd(resid2)
+            noise2 = np.maximum(noise2, 0.1 * global_noise2)
+            # Extrapolate noise for low frequencies (if enabled)
             if oneoverf_extrapolate:
-                baseline = _extrapolate_baseline(baseline, freqs, time, width, threshold=oneoverf_threshold)
-            residual = sqrtp - baseline
-        else:
-            residual = sqrtp
-        # Coverage proxy via kkmi(f)
-        fsec = freqs / day2sec
-        q = pifac * Rstar * Rsun / (G * Mstar * Msun) ** (1.0 / 3.0) * fsec ** (2.0 / 3.0)
-        qmi = q / 2.0
-        tiny = onehour * freqs / 2.0
-        qmi = np.maximum(qmi, tiny)
-        kkmi = np.maximum(5, np.floor(npt * qmi)).astype(float)
-        coverage = np.clip(kkmi / float(npt), 0.01, 1.0)  # clip to [1%, 100%]
-        # Rolling MAD (constant window at edges)
-        local_med = _rolling_median(residual, width)
-        mad = _rolling_mad(residual - local_med, width)
-        noise = 1.4826 * mad
-        # Robust fallback
-        global_noise = np.nanmedian(noise[noise > eps])
-        if not np.isfinite(global_noise) or global_noise <= 0:
-            global_noise = np.nanstd(residual)
-        noise = np.maximum(noise, 0.1 * global_noise)
-        # Extrapolate noise for low frequencies (if enabled)
-        if oneoverf_extrapolate:
-            noise = _extrapolate_noise(noise, freqs, time, width, threshold=oneoverf_threshold)
-        # Weighted normalization with floor
-        denom = noise * coverage + eps
-        power = residual / (denom + eps)
+                noise2 = _extrapolate_noise(noise2, freqs, time, width, threshold=oneoverf_threshold)
+            power = resid2 / (noise2 + eps)
+        else:  # "coverage_mad" (default)
+            # Compute baseline for coverage_mad normalization using iterative method
+            if oneoverf_correction:
+                baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+                if oneoverf_extrapolate:
+                    baseline = _extrapolate_baseline(baseline, freqs, time, width, threshold=oneoverf_threshold)
+                residual = sqrtp - baseline
+            else:
+                residual = sqrtp
+            # Coverage proxy via kkmi(f)
+            fsec = freqs / day2sec
+            q = pifac * Rstar * Rsun / (G * Mstar * Msun) ** (1.0 / 3.0) * fsec ** (2.0 / 3.0)
+            qmi = q / 2.0
+            tiny = onehour * freqs / 2.0
+            qmi = np.maximum(qmi, tiny)
+            kkmi = np.maximum(5, np.floor(npt * qmi)).astype(float)
+            coverage = np.clip(kkmi / float(npt), 0.01, 1.0)  # clip to [1%, 100%]
+            # Rolling MAD (constant window at edges)
+            local_med = _rolling_median(residual, width)
+            mad = _rolling_mad(residual - local_med, width)
+            noise = 1.4826 * mad
+            # Robust fallback
+            global_noise = np.nanmedian(noise[noise > eps])
+            if not np.isfinite(global_noise) or global_noise <= 0:
+                global_noise = np.nanstd(residual)
+            noise = np.maximum(noise, 0.1 * global_noise)
+            # Extrapolate noise for low frequencies (if enabled)
+            if oneoverf_extrapolate:
+                noise = _extrapolate_noise(noise, freqs, time, width, threshold=oneoverf_threshold)
+            # Weighted normalization with floor
+            denom = noise * coverage + eps
+            power = residual / (denom + eps)
 
-    # Sanitize: replace NaN/Inf with very negative values so they don't dominate sort
-    power = np.where(np.isfinite(power), power, -1e30)
+        # Sanitize: replace NaN/Inf with very negative values so they don't dominate sort
+        power = np.where(np.isfinite(power), power, -1e30)
+        psort = np.argsort(power) #Get sorted indicies to find best event
+        bper   = periods[psort[-1]]   #Period of best event
 
-    psort = np.argsort(power) #Get sorted indicies to find best event
     bpower = power[psort[-1]]     #Power of best event
-    bper   = periods[psort[-1]]   #Period of best event
-    
     in1   = jn1[psort[-1]]        #start of ingress (based on BLS, so there is will be some error)
     in2   = jn2[psort[-1]]        #end of egress 
 
@@ -1020,7 +1028,7 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     #Dirty translation of Fortran from transitfind5
     fmean, std, depth, snr = bls_stats(epo, bper, tdur, npt, time + mintime - Keptime, flux) 
 
-    return periods, power, bper, epo, bpower, snr, tdur, depth
+    return periods, power, bper, rawper, epo, bpower, snr, tdur, depth
 
 def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
@@ -1148,7 +1156,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     oneoverf_correction = getattr(tpy5_inputs, "oneoverf_correction", False)
     oneoverf_extrapolate = getattr(tpy5_inputs, "oneoverf_extrapolate", True)
     oneoverf_threshold = getattr(tpy5_inputs, "oneoverf_threshold", None)
-    periods, power, bper, epo, bpower, snr, tdur, depth = \
+    periods, power, bper, rawper, epo, bpower, snr, tdur, depth = \
         calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction, oneoverf_extrapolate, oneoverf_threshold)
     if tpy5_inputs.plots > 0:
         makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, \
@@ -1157,6 +1165,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     gbls_ans = gbls_ans_class()
     gbls_ans.epo    = epo
     gbls_ans.bper   = bper
+    gbls_ans.rawper = rawper
     gbls_ans.bpower = bpower
     gbls_ans.snr    = snr
     gbls_ans.tdur   = tdur
@@ -1843,29 +1852,35 @@ def tls(tpy5_inputs, t=np.array([0]), f=np.array([0]), dy=None):
     defaultpars = getTLSDict(tpy5_inputs, t)
     # The direct user input of parameters will override defaults.
     pars = {**defaultpars, **tpy5_inputs.pars}
+    if tpy5_inputs.search_verbose:
+        pprint.pprint(pars)
     t0 = t - tpy5_inputs.zerotime
     model = tlsm.transitleastsquares(t0, f, dy=dy)
     tlsob = model.power(**pars, verbose=tpy5_inputs.search_verbose) # running TLS
+    srU, srC = np.unique(tlsob.SR, return_counts=True)
+    srflag = (srU[0] < 10**(-3)) & (srC[0] > len(tlsob.SR)/100)
 
-    if tpy5_inputs.search_verbose:
-        pprint.pprint(pars)
     tlsans = gbls_ans_class()
     tlsans.epo      = tlsob.T0
     tlsans.bper     = tlsob.period
+    tlsans.rawper   = tlsob.periods[np.argmax(tlsob.power_raw)]    
     tlsans.bpower   = tlsob.SDE
     tlsans.snr      = tlsob.snr
     tlsans.tdur     = tlsob.duration
     tlsans.depth    = (1-tlsob.depth)
+    tlsans.SR       = srflag
     if tpy5_inputs.return_spectrum:
-        tlsans.periods  = tlsob.periods  # Full period array 
-        tlsans.power    = tlsob.power  # Full power array 
-        tlsans.freqs    = 1/tlsob.periods  # Full frequency array 
+        tlsans.periods  = tlsob.periods
+        tlsans.power    = tlsob.power  
+        # Rather than the frequencies, we return the signal residuals for TLS
+        tlsans.SR       = tlsob.SR
 
     if tpy5_inputs.plots > 0:
+        timezeroed = t - np.min(t)
         if np.isnan(tlsob.period) or tlsob.transit_count <= 1:
-            makeplot_pulse(t, f, tlsans, np.min(t), tpy5_inputs.zerotime, filename, tpy5_inputs.plots)
+            makeplot_pulse(timezeroed, f, tlsans, np.min(t), tpy5_inputs.zerotime, filename, tpy5_inputs.plots)
         else:
-            makeplot(tlsob.periods, tlsob.power, t, f, np.min(t), tpy5_inputs.zerotime, \
+            makeplot(tlsob.periods, tlsob.power, timezeroed, f, np.min(t), tpy5_inputs.zerotime, \
             tlsob.T0, tlsob.period, tlsob.SDE, tlsob.snr, tlsob.duration, (1-tlsob.depth), filename, tpy5_inputs.plots)
         
     return tlsans

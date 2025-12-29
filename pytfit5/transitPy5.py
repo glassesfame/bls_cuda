@@ -573,6 +573,7 @@ class tpy5_inputs_class:
         # Search parameters!
         self.filename = "filename.txt"  # Lightcurve filename
         self.lcdir    = ""              # Lightcurve directory
+        self.savedir  = ""              # Save directory (for plots as well)
         self.zerotime = 0.0             # Time offset (e.g., for Kepler/TESS)
         self.freq1    = -1              # Minimum frequency to search [c/d] (auto if -1)
         self.freq2    = -1              # Maximum frequency to search [c/d] (auto if -1)
@@ -595,7 +596,6 @@ class tpy5_inputs_class:
         self.search_verbose = False        # from the transitleastsquares module plus pars check
         self.pars = {}              # if any additional parameters are needed for tls
         self.u = [0.4804, 0.1867]   # the default limb-darkening from transitleastsquares
-        self.transitmin = 1         # the number of minimum transits required
         self.arstarmin = 1.1        # truncate periods violating this bound
         self.upbuff = 0.2           # maximum mass/radius is 20% of the input
         self.lowbuff = 0.8          # minimum mass/radius is 80% of the input
