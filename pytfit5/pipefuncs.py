@@ -5,6 +5,7 @@ homedir = str(Path(funcdir).parent.absolute())
 datadir = lambda file: f'{homedir}/data/{file}'
 
 import h5py
+import copy
 import timeit
 import matplotlib
 import numpy as np
@@ -14,6 +15,8 @@ sys.path.insert(0, f'{homedir}')
 import pytfit5.bls_cpu as gbls
 import pytfit5.transitPy5 as tpy5
 import pytfit5.transitmodel as transitm
+from pytfit5.synthetic import compare_bls_injection
+
 
 ## CONSTANTS
 ROMANOFF = 2461450
@@ -21,6 +24,9 @@ SAVEDIR = f'{homedir}/data/output'
 LCDIR = f'{homedir}/data/rlc' # lcdir only contains a few sample lightcurves!
 COLS = np.array(['RIC', 'Period', 'T0', 'TDur', 'TDepth', \
                  'RawPer', 'SR', 'Power', 'SNR', 'Time'])
+RECCOLS = ['overlap_fraction', 'precision', 'true_positive', \
+          'false_positive', 'false_negative', 'period_factor', \
+          'period_factor_type', 'is_recovered']
 starID = np.loadtxt(datadir('rlc/rand42ric.txt')).astype(int)
 cat = pd.read_csv(datadir('trunccat.csv')) # trimmed planet catalogue!
 
@@ -262,6 +268,173 @@ def setupPlots(sizeTuple, row=1, col=2, logscale=1, fontsize=16, scalar=True, **
             ax.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
     
     return fig, axs
+
+def rho(mass, radius):
+    '''
+    Getting the density parameter!
+    '''
+    radius_cm = radius*gbls.Rsun*100
+    mass_g = mass*gbls.Msun*10**3
+    return mass_g / (4/3 * np.pi * radius_cm**3)
+
+def getROIRow(roi, df):
+    '''
+    Getting the row of values for the specified ROI.
+    (works because we only expect one row for each ROI)
+    '''
+    roidf = df[df.planet_id == roi]
+    return roidf.iloc[0]
+
+def makesol(roirow):
+    '''
+    Formatting the dataframe information into a class, so it 
+    can be brought into the function accordingly.
+    ''' 
+    if 'star_rho' not in roirow.index:
+        roirow['star_rho'] = rho(roirow.star_mass, roirow.star_radius)
+        
+    solr = transitm.transit_model_class()
+    solr.npl = 1.0
+    solr.t0 = [roirow.transit_t0_BRJD + (0.5 - 105)]
+    solr.per = [roirow.transit_period]
+    solr.rdr = [roirow.transit_rp_rstar]
+    solr.bb = [roirow.planet_impact]
+    solr.rho = roirow.star_rho
+
+    return solr
+
+def roirec(roirow, rundf, rlcdir=None):
+    '''
+    For each ROI, we must iterate through all the runs for that specific RIC.
+    '''
+    roirow = roirow.iloc[0]
+    roi = float(roirow.planet_id)
+    
+    ricrundf = rundf[np.isin(rundf.RIC, int(roi))]
+    recdf = pd.DataFrame(columns=RECCOLS)
+    # The solution and time array are constant for all runs.
+    roisol = makesol(roirow)
+    if rlcdir == None:
+        rlcdir = f'{LCDIR}/{int(roi)}raw.h5'
+    phot = read2Phot(rlcdir)
+    phot.time = phot.time - ROMANOFF
+
+    for runrow in ricrundf.itertuples():
+        runsol = copy.deepcopy(roisol)
+        runsol.t0 = [runrow.T0]
+        runsol.per = [runrow.Period]
+        runsol.rdr = [np.sqrt(runrow.TDepth)]
+        runrec = compare_bls_injection(phot, sol_injected=roisol,\
+                sol_bls=runsol, verbose=False)
+        # This unpacks easily because runrec is in a dictionary form.
+        recdf.loc[len(recdf)] = runrec
+
+    # Convert the index from ricrundf to the recovery dataframe.
+    recdf.set_index(ricrundf.index, inplace=True)
+    m = np.array(recdf.period_factor_type != 'mismatch')
+    if bool(np.sum(m)):
+        adddf = ricrundf.loc[m, ['Period', 'T0', 'TDur', 'TDepth', 'SNR']]
+        dfs = pd.concat([adddf, recdf[m]], axis=1)
+        return dfs
+
+def pulseRICs(bdf):
+    '''
+    If the raw period of BLS is zero, then we know the pulse signal strength
+    has 'won' over the periodic signal strength. Therefore, we look for cases
+    where all the runs for a certain ric have raw power of zero.
+    '''
+    rics, counts = np.unique(bdf.RIC, return_counts=True)
+    # Count the number of runs per RIC
+    rics0, counts0 = np.unique(bdf.RIC[bdf.RawPer == 0], return_counts=True)
+    # Count the number of pulse runs
+    pulsem = np.isin(rics, rics0)
+    # If a RIC only has pulse runs then a periodic signal was never searched for.
+    return rics0[counts[pulsem] == counts0]
+
+def persnr(rois, cat):
+    '''
+    Getting the period and SNR from the catalogue!
+    Mainly for plotting purposes.
+    '''
+    m = np.isin(cat.planet_id, rois)
+    return cat.transit_period[m], cat.planet_transit_snr[m]
+
+# Primarily used for the histogram of the recovery statistic.
+def getLims(arr):
+    '''
+    To return where the bins should begin by the minimum value
+    and where the bin range should end by the maximum value.
+    '''
+    return np.min(arr), np.max(arr)
+
+def logBins(dMin, dMax, binNum):
+    '''
+    Return the bin edges in logarithmic intervals. 
+    '''
+    return np.logspace(np.log10(dMin), np.log10(dMax), binNum+1)
+
+def linBins(dMin, dMax, binNum):
+    '''
+    Return the bin edges in linear intervals. 
+    '''
+    return np.linspace(dMin, dMax, binNum+1)
+
+# Constructing and running the histogram plotting functionalities. 
+def getHist(data, binNum, log, xMin=0, xMax=0):
+    '''
+    Obtain the histogram and the bin edges. Can be used for both logarithmic and linear plots. 
+    '''
+
+    if xMin == xMax:
+        xMin, xMax = getLims(data[~np.isnan(data)])
+    if log:
+        binE = logBins(xMin, xMax, binNum)
+    else:
+        binE = linBins(xMin, xMax, binNum)
+    
+    return np.histogram(data, bins=binE)
+
+def stepFul(h, x):
+    '''
+    So the step function begins at zero instead of starting midair.
+    '''
+    return np.append(np.array([0]), h), np.append(np.array([0]), x)
+
+def zeroB(x):
+    '''
+    To ensure the zero bin is not overly large and allows the x array to increase in order.
+    '''
+    if x[0] < x[1]-x[0]:
+        return x[0]
+    return x[1]-x[0]
+
+def histPlot(bData, tData, ax, labels=['TLS', 'TLS Mod'], binNum=25, log=True, rec=True):
+    '''
+    Allows for common formatting of the histogram. 
+    '''
+    if rec:
+        tH, tX = getHist(tData[tData > 0], binNum, log)
+        # bH, bX = np.histogram(bData[bData > 0], bins=tX)
+        bH, bX = getHist(bData[bData > 0], binNum, log)
+        
+        tX = np.append([0, zeroB(tX)], tX)
+        tH = np.append([len(tData[tData <= 0]), 0], tH)
+        bX = np.append([0, zeroB(bX)], bX)
+        bH = np.append([len(bData[bData <= 0]), 0], bH)
+    else:
+        tH, tX = getHist(tData, binNum, log)
+        bH, bX = np.histogram(bData, bins=tX)
+        
+    ax.hist(tX[:-1], tX, weights=tH, alpha=0.3, color='orange')
+    ax.hist(bX[:-1], bX, weights=bH, edgecolor='white', alpha=0.8, label=labels[0])
+    tH, tX = stepFul(tH, tX)
+    ax.step(tX, np.append(tH, np.array([0])), where='post', linewidth=3, label=labels[1])
+
+    ax.grid(True, linestyle='--', alpha=0.75)
+    ax.set_ylabel('Frequency')
+    ax.legend()
+
+    return ax
 
 # roput = tpy5.tpy5_inputs_class()
 # roput.zerotime = ROMANOFF
