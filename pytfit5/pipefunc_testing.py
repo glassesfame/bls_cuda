@@ -1,8 +1,9 @@
 import sys
 from pathlib import Path
-funcdir = str((Path(__file__).resolve()).parent)
-homedir = str(Path(funcdir).parent.absolute())
-datadir = lambda file: f'{homedir}/data/{file}'
+import bls_cpu as gbls
+# funcdir -> folder (parent removes the file); homedir -> bls_cuda
+datadir = lambda file: f'{gbls.homedir}/data/{file}'
+rlcdir = lambda file: f'/home/sliu/digitalliance/data/{file}'
 
 import h5py
 import copy
@@ -11,24 +12,52 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-sys.path.insert(0, f'{homedir}')
-import pytfit5.bls_cpu as gbls
-import pytfit5.transitPy5 as tpy5
-import pytfit5.transitmodel as transitm
-from pytfit5.synthetic import compare_bls_injection
-
+sys.path.insert(0, f'{gbls.homedir}')
+import transitPy5 as tpy5
+import transitmodel as transitm
 
 ## CONSTANTS
 ROMANOFF = 2461450
-SAVEDIR = f'{homedir}/data/output'
-LCDIR = f'{homedir}/data/rlc' # lcdir only contains a few sample lightcurves!
+SAVEDIR = f'{gbls.homedir}/data/output'
+LCDIR = rlcdir('rlc')
 COLS = np.array(['RIC', 'Period', 'T0', 'TDur', 'TDepth', \
                  'RawPer', 'SR', 'Power', 'SNR', 'Time'])
 RECCOLS = ['overlap_fraction', 'precision', 'true_positive', \
           'false_positive', 'false_negative', 'period_factor', \
           'period_factor_type', 'is_recovered']
-starID = np.loadtxt(datadir('rlc/rand42ric.txt')).astype(int)
+starID = np.loadtxt(rlcdir('stID.txt')).astype(int)
 cat = pd.read_csv(datadir('trunccat.csv')) # trimmed planet catalogue!
+
+# inherit from this class, so we can not deal with compatability issues and just put this into our functionalities?
+class pipelineIns(tpy5.tpy5_inputs_class):
+
+    def __init__(self):
+        super().__init__() 
+        self.rics = starID
+        self.df = cat
+        self.blsfunc = gbls.bls
+        self.tlsfunc = gbls.tls
+        self.single = False
+        self.tbuff = 0.25
+        self.bbuff = 0.05
+        self.saveIt = 150
+        self.savedir, self.lcdir = self.t5Compat()
+        
+    def t5Compat(self):
+        '''
+        Changing the directionaries so that we save it to the correct directionaries
+        and also configuring the lcdir so that it points to an absolute path.
+        '''
+        # Configure the save mechanism and the light-curve directory.
+        if not self.lcdir:
+            self.lcdir = LCDIR
+        if not self.savedir:
+            self.savedir = lambda method, num: f'{SAVEDIR}/{self.filename}{method}{num}.csv'
+            
+        if isinstance(self.savedir, str): # Ensuring nothing will go wrong with saving.
+            savedir = self.savedir.strip('/')
+            self.savedir = lambda file: f'/{savedir}/{file}'
+        return self.savedir, self.lcdir
 
 def read2Phot(filepath, phot=None):
     '''
@@ -83,6 +112,20 @@ def getROIRow(roi, df):
     roidf = df[df.planet_id == roi]
     return roidf.iloc[0]
 
+def prepInputs(ric, t5puts):
+    '''
+    Loading in the photometric data and data processing.
+    '''
+    phot = read2Phot(f'{t5puts.lcdir}/{int(ric)}/raw.h5') # getting the photometric data
+    m = processData(phot, t5puts) # detrending/clipping
+    ## The stellar parameters which are unique to each RIC.
+    starRow = getRICRow(ric, t5puts.df)
+    t5puts.rstar = float(starRow['star_radius'])
+    t5puts.mstar = float(starRow['star_mass'])
+    t5puts.u = starRow[['transit_limb1_F146', 'transit_limb2_F146']].values
+
+    return t5puts, phot.time[m], phot.flux_f[m], phot.ferr[m]
+
 # To be able to swiss-cheese in the loop function.
 getPhase1 = lambda time, stats: (time - stats[1])/stats[0]
 def getTransArr(time, stats, buff=0.2):
@@ -110,43 +153,38 @@ def swissCheese(t, f, stats, buff):
     mask = getTransArr(t0, stats, buff=buff)
     return ~np.array(mask).astype(bool)
 
-
-def singleIt():
+def singleIt(t5puts, t, f, err, func):
     '''
-    Running a single iteration, which can be used in a the loop functionality
-    but also can be controlled individually. 
+    Running a single iteration
     '''
     t1 = timeit.default_timer()
     ansob = func(t5puts, t, f, err)
     t2 = timeit.default_timer()
     stats = np.array([ansob.bper, ansob.epo, ansob.tdur, ansob.depth, \
                       ansob.rawper, ansob.SR, ansob.bpower, ansob.snr])
-    return stats
+    return stats, t2-t1
 
 def loop(t5puts, t, f, err, func, buff):
     '''
     Controls the while loop of tls or bls and returns an array of all the values.
     We get the stellar parameters 
     '''
-    it = 0
+
     ricRun = [] # Unknown length as we begin
-    stats = [10] # Arbitrarily setting the SNR to proceed.
+    # run one iteration first, and then break if we only need to run once.
+    stats, tdiff = singleIt(t5puts, t, f, err, func)
+    ricRun.append(np.append(stats, tdiff))
+    if t5puts.single: # Do we loop or do we not?
+        return np.array(ricRun)
 
-    while np.abs(stats[-1]) > 6 and it < 10:
+    it = 1
     # Looping until we do not see a signal or the baseline of 10.
-        t1 = timeit.default_timer()
-
-        if func == gbls.tls:
-            ansob = func(t5puts, t, f, err)
-        else: # we can run bls_pulse or bls
-            ansob = func(t5puts, t, f)
-        t2 = timeit.default_timer()
-        stats = np.array([ansob.bper, ansob.epo, ansob.tdur, ansob.depth, \
-                          ansob.rawper, ansob.SR, ansob.bpower, ansob.snr])
-        ricRun.append(np.append(stats, t2-t1))
+    while np.abs(stats[-1]) > 6 and it < 10:
         # Require the time, the flux and the error be trimmed.
         scm = swissCheese(t, f, stats[:3], buff=buff)
         t, f, err = t[scm], f[scm], err[scm]
+        stats, tdiff = singleIt(t5puts, t, f, err, func)
+        ricRun.append(np.append(stats, tdiff))
         it += 1
 
     return np.array(ricRun)
@@ -170,74 +208,28 @@ def save2csv(savename, frame):
     df.to_csv(savename, index=False)
     return []
 
-
-def prepInputs(ric, t5inputs, df):
+def main(t5puts):
     '''
-    Loading in the photometric data and data processing.
+    Note that t5puts are the pipeline inputs which inherits
+    from tpy5_input_class. 
     '''
-    phot = read2Phot(f'{t5puts.lcdir}/{int(ric)}raw.h5') # getting the photometric data
-    m = processData(phot, t5puts) # detrending/clipping
-    ## The stellar parameters which are unique to each RIC.
-    starRow = getRICRow(ric, df)
-    t5puts.rstar = float(starRow['star_radius'])
-    t5puts.mstar = float(starRow['star_mass'])
-    t5puts.u = starRow[['transit_limb1_F146', 'transit_limb2_F146']].values
-
-    return t5inputs, phot.time[m], phot.flux_f[m], phot.ferr[m]
-
-
-# inherit from this class, so we can not deal with compatability issues and just put this into our functionalities?
-class pipelineIns(tpy5.tpy5_inputs_class):
-
-    def __init__(self):
-        self.rics =
-        self.df = 
-        self.blsfunc = True
-        self.tlsfunc = True
-        self.
-        self.tbuff = 0.25
-        self.bbuff = 0.05
-        self.saveIt = 150
-
-    def t5Compat(self, t5inputs):
-        '''
-        '''
-         # Configure the save mechanism and the light-curve directory.
-        if not t5puts.lcdir:
-            t5puts.lcdir = LCDIR
-        if not t5puts.savedir:
-            t5puts.savedir = lambda method, num: f'{SAVEDIR}/{t5puts.filename}{method}{num}.csv'
-            
-        if isinstance(t5puts.savedir, str): # Ensuring nothing will go wrong with saving.
-            savedir = t5puts.savedir.strip('/')
-            t5puts.savedir = lambda file: f'/{savedir}/{file}'
-        
-
-def main(piputs t5puts, rics, df, ):
-    '''
-    
-    '''
-
     tlsFrames, blsFrames = [], []
     saveNum = 0
     
-    for i, ric in enumerate(rics):
+    for i, ric in enumerate(t5puts.rics):
         print(f'Starting RIC: {ric}, which is number: {i}!')
-        t5inputs, t, f, err = prepInputs(ric, t5inputs, df)
+        t5puts, t, f, err = prepInputs(ric, t5puts)
 
-        
-        
-        if runT: ## Running TLS
-            tarr = loop(t5puts, np.copy(t), np.copy(f), np.copy(err), gbls.tls, tbuff)
+        if t5puts.tlsfunc is not None:
+            tarr = loop(t5puts, np.copy(t), np.copy(f), np.copy(err), t5puts.tlsfunc, t5puts.tbuff)
             tlsFrames.append(writedf(ric, tarr))
-        if runB: ## Running BLS
-            if pulse:
-                barr = loop(t5puts, np.copy(t), np.copy(f), np.copy(err), gbls.bls_pulse, bbuff)
+    
+        if t5puts.blsfunc is not None:
+            barr = loop(t5puts, np.copy(t), np.copy(f), np.copy(err), t5puts.blsfunc, t5puts.bbuff)
             blsFrames.append(writedf(ric, barr))
-            
 
         ## Saving if necessary!
-        if max(len(tlsFrames), len(blsFrames)) >= saveIt:
+        if max(len(tlsFrames), len(blsFrames)) >= t5puts.saveIt:
             # Checking with max because len(tlsFrame) == len(blsFrame) if both are run
             print(f'This is save no. {saveNum}.')
             tlsFrames = save2csv(t5puts.savedir('tls', saveNum), tlsFrames)
@@ -479,9 +471,21 @@ def histPlot(bData, tData, ax, labels=['TLS', 'TLS Mod'], binNum=25, log=True, r
 
     return ax
 
-# roput = tpy5.tpy5_inputs_class()
-# roput.zerotime = ROMANOFF
-# roput.plots = 0
-# roput.boxbin, roput.dsigclip = 3.0, 0
-# roput.filename = 'end'
-# main(roput, starID[300:], cat)
+import pickle
+with open(datadir('lowsnr.pickle'), 'rb') as f:
+    lowrics = pickle.load(f)
+
+piput = pipelineIns()
+piput.zerotime = ROMANOFF
+piput.boxbin, piput.dsigclip = 3.0, 0
+piput.filename = 'pulse_noise_floor'
+piput.rics = lowrics['all']
+piput.tlsfunc = None
+piput.plots = 0
+piput.blsfunc = gbls.bls_pulse
+piput.saveIt = 500
+main(piput)
+
+piput.filename = 'bls_noise_floor'
+piput.blsfunc = gbls.bls
+main(piput)
