@@ -1,8 +1,10 @@
 import sys
 from pathlib import Path
-import bls_cpu as gbls
+# Can have compatability issues with imports so redefine it.
+funcdir = str((Path(__file__).resolve()).parent)
+homedir = str(Path(funcdir).parent.absolute())
 # funcdir -> folder (parent removes the file); homedir -> bls_cuda
-datadir = lambda file: f'{gbls.homedir}/data/{file}'
+datadir = lambda file: f'{homedir}/data/{file}'
 rlcdir = lambda file: f'/home/sliu/digitalliance/data/{file}'
 
 import h5py
@@ -12,9 +14,10 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-sys.path.insert(0, f'{gbls.homedir}')
-import transitPy5 as tpy5
-import transitmodel as transitm
+sys.path.insert(0, f'{homedir}')
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
+import pytfit5.transitmodel as transitm
 
 ## CONSTANTS
 ROMANOFF = 2461450
@@ -471,21 +474,21 @@ def histPlot(bData, tData, ax, labels=['TLS', 'TLS Mod'], binNum=25, log=True, r
 
     return ax
 
-import pickle
-with open(datadir('lowsnr.pickle'), 'rb') as f:
-    lowrics = pickle.load(f)
+# import pickle
+# with open(datadir('lowsnr.pickle'), 'rb') as f:
+#     lowrics = pickle.load(f)
 
-piput = pipelineIns()
-piput.zerotime = ROMANOFF
-piput.boxbin, piput.dsigclip = 3.0, 0
-piput.filename = 'pulse_noise_floor'
-piput.rics = lowrics['all']
-piput.tlsfunc = None
-piput.plots = 0
-piput.blsfunc = gbls.bls_pulse
-piput.saveIt = 500
-main(piput)
+# piput = pipelineIns()
+# piput.zerotime = ROMANOFF
+# piput.boxbin, piput.dsigclip = 3.0, 0
+# piput.filename = 'pulse_noise_floor'
+# piput.rics = lowrics['all']
+# piput.tlsfunc = None
+# piput.plots = 0
+# piput.blsfunc = gbls.bls_pulse
+# piput.saveIt = 500
+# main(piput)
 
-piput.filename = 'bls_noise_floor'
-piput.blsfunc = gbls.bls
-main(piput)
+# piput.filename = 'bls_noise_floor'
+# piput.blsfunc = gbls.bls
+# main(piput)

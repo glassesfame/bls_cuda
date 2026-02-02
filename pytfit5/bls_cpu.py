@@ -91,11 +91,13 @@ def prep_timeflux(tpy5_inputs, time, flux, ferr=None, central=True):
 
     if tpy5_inputs.lcdir != "":
         filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
+    else:
+        filename = tpy5_inputs.filename
+        
     if (time.shape[0] < 2) or (flux.shape[0] < 2):
         time, flux, ferr = readfile(filename)
-
     if not central:
-        return time, flux, ferr
+        return filename, time, flux, ferr
         
     tpy5_inputs.mintime = np.min(time)
     time = time - tpy5_inputs.mintime 
