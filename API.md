@@ -1005,6 +1005,9 @@ transitp.printParams(sol_mcmc)
 # Plot the transit model
 transitp.plotTransit(phot, sol_mcmc, pl_to_plot=1)
 
+# Optional axis controls
+transitp.plotTransit(phot, sol_mcmc, pl_to_plot=1, y1=0.997, y2=1.002, xdur_scale=2.0)
+
 # Continue MCMC if needed (using metadata)
 if 'x' in metadata and 'beta' in metadata:
     lnprob, x_new, beta_new = tmcmc.genmcmcInput(sol_mcmc, params_to_fit)

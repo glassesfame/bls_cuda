@@ -5,7 +5,8 @@ from pytfit5.transitmodel import transitModel
 from pytfit5.keplerian import transitDuration
 from pytfit5.effects import ttv_lininterp
 
-def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1, filename=None):
+def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1,
+                filename=None, y1=None, y2=None, xdur_scale=1.5):
     """
     Plots a transit model. Assuming time is in days. Set flux=0 for no scatterplot.
 
@@ -13,6 +14,8 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1, file
     sol: Transit model object with parameters
     nintg: Number of points inside the integration time
     pl_to_plot: Index of planet to plot. 1 being the first planet
+    y1, y2: Optional y-axis limits. If not provided, limits are computed from the data.
+    xdur_scale: Multiplier applied to the transit duration when setting x-axis limits.
     """
 
     # Read phot class
@@ -83,20 +86,25 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1, file
         i2 = len(model_sorted)
     ymin = min(model_sorted[i1:i2])
     ymax = max(model_sorted[i1:i2])
-    y1 = ymin - 0.1*(ymax-ymin) - 3.0*stdev
-    y2 = ymax + 0.1*(ymax-ymin) + 3.0*stdev
-    if np.abs(y2 - y1) < 1.0e-10:
-        y1 = min(flux)
-        y2 = max(flux)
+    y1_auto = ymin - 0.1*(ymax-ymin) - 3.0*stdev
+    y2_auto = ymax + 0.1*(ymax-ymin) + 3.0*stdev
+    if np.abs(y2_auto - y1_auto) < 1.0e-10:
+        y1_auto = min(flux)
+        y2_auto = max(flux)
 
     #Make sure data outliers are seen.
-    y1 = np.min([y1, min(flux)])
-    y2 = np.max([y2, max(flux)])
+    y1_auto = np.min([y1_auto, min(flux)])
+    y2_auto = np.max([y2_auto, max(flux)])
+
+    if y1 is None:
+        y1 = y1_auto
+    if y2 is None:
+        y2 = y2_auto
 
     mpl.rcParams.update({'font.size': 22}) # Adjust font
 
     # Generate smooth model for plotting
-    phase_smooth = np.linspace(-1.5*tdur, 1.5*tdur, 1000)
+    phase_smooth = np.linspace(-xdur_scale*tdur, xdur_scale*tdur, 1000)
     # Convert phase (hours) to time (days) relative to t0
     # phase = (t - t0) * 24
     # t = phase/24 + t0
@@ -121,7 +129,7 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1, file
     plt.plot(phase_smooth, smooth_model, c="red", lw=3.0)
     plt.xlabel('Phase (hours)') #x-label
     plt.ylabel('Relative Flux') #y-label
-    plt.axis((-1.5*tdur, 1.5*tdur, y1, y2))
+    plt.axis((-xdur_scale*tdur, xdur_scale*tdur, y1, y2))
     plt.tick_params(direction="in")
     if (filename==None):
         plt.show()
