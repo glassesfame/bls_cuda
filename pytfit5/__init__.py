@@ -3,6 +3,8 @@ import numpy as np
 # Handle the NumPy 1.x to 2.0 trapezoid rename seamlessly.
 if not hasattr(np, 'trapezoid'):
     np.trapezoid = np.trapz
+if not hasattr(np, 'trapz'):
+    np.trapz = np.trapezoid
 
 from . import bls_cpu
 from . import transitPy5

@@ -19,6 +19,8 @@ from scipy import stats #For Kernel Density Estimation
 # Handle the NumPy 1.x to 2.0 trapezoid rename seamlessly.
 if not hasattr(np, 'trapezoid'):
     np.trapezoid = np.trapz
+if not hasattr(np, 'trapz'):
+    np.trapz = np.trapezoid
 
 # Nice for keeping an eye on progress.
 from tqdm import trange
@@ -1636,7 +1638,7 @@ def intperc(x,x_eval,kde1,perc=0.6827):
                 i1=i1+1
             #print('case2')
 
-        intval=np.trapz(kdea[j1:j2],x_eval[j1:j2])
+        intval=np.trapezoid(kdea[j1:j2],x_eval[j1:j2])
         #print(j1,j2,intval,kdea[j1test],kdea[j2test])
 
         #make sure we can break from loop
