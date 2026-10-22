@@ -16,12 +16,12 @@ from tqdm import tqdm
 
 from numba import jit #We will attempt to precompile some routines
 import concurrent.futures
+from transitleastsquares import transitleastsquares
 # Importing the modules, must be from bls_cuda for pytfit5 to be a module.
 sys.path.insert(0, f'{homedir}')
 from pytfit5.transitPy5 import tpy5_inputs_class
 import pytfit5.period_validation as pval
 import pytfit5.normalisation as norm
-from pytfit5.tls.transitleastsquares import main as tlsm
 
 # Backward compatibility alias (deprecated)
 gbls_inputs_class = tpy5_inputs_class
@@ -87,6 +87,7 @@ def prep_timeflux(tpy5_inputs, time, flux, ferr=None, central=True):
     Assigns the lcdir and filename if neccessary to prevent errors.
     Ensures time and flux are loaded if not provided. Pre-processing
     which is to find the minimum time and to subtract the median of flux.
+    Note: zerotime is pre-defined and mintime > zerotime bc no negative t values
     '''
 
     if tpy5_inputs.lcdir != "":
@@ -99,6 +100,7 @@ def prep_timeflux(tpy5_inputs, time, flux, ferr=None, central=True):
     if not central:
         return filename, time, flux, ferr
         
+    # np.min(time) = tpy5_inputs.mintime + tpy5_inputs.zerotime
     tpy5_inputs.mintime = np.min(time)
     time = time - tpy5_inputs.mintime 
     flux = flux - np.median(flux)
@@ -1062,7 +1064,7 @@ def pulse_search(tpy5_inputs, time, flux):
     mad = np.median(np.abs(flux_norm))
     sigma = mad * 1.4826
     
-    t_start = time[0]
+    t_start = time[0] # should this be the same as np.min(time)?
     duration = time[-1] - t_start
     
     # 2. Binning
@@ -1103,7 +1105,7 @@ def pulse_search(tpy5_inputs, time, flux):
     best_t0 = t_start + (best_start_bin + 0.5 * best_width_bins) * bin_duration_days
     # Write into the form of the gbls answer class
     ans = gbls_ans_class()
-    ans.epo = best_t0
+    ans.epo = best_t0 + tpy5_inputs.mintime - tpy5_inputs.zerotime 
     rho_star = pval.get_stellar_density(tpy5_inputs.mstar, tpy5_inputs.rstar)
     P_est, _, _, _ = pval.estimate_single_transit_period(time=time,
                         tdur=best_duration, rho_star=rho_star, margin_factor=1.5)
@@ -1139,13 +1141,10 @@ def makeplot_pulse(time, flux, ans, mintime, Keptime, filename, plots):
     ax1.set_title("Single Pulse Detection")
     
     # Mark the event
-    # ans.epo is in 'time' frame (0-based)
-    t0_plot = ans.epo + mintime - Keptime
-    dur = ans.tdur
-    
     ymin, ymax = ax1.get_ylim()
-    ax1.axvline(t0_plot, color='r', alpha=0.5)
-    ax1.axvspan(t0_plot - dur/2, t0_plot + dur/2, color='r', alpha=0.2)
+    # changed ans.epo so it is no longer 0-based, i.e. same as makeplot()
+    ax1.axvline(ans.epo, color='r', alpha=0.5)
+    ax1.axvspan(ans.epo - ans.tdur/2, ans.epo + ans.tdur/2, color='r', alpha=0.2)
     
     # Bottom Row Split
     gs_bottom = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[1], width_ratios=[1, 2])
@@ -1156,7 +1155,7 @@ def makeplot_pulse(time, flux, ans, mintime, Keptime, filename, plots):
     
     stats_text = [
         f"Type: Single Pulse",
-        f"T0   = {t0_plot:.6f} days",
+        f"T0   = {ans.epo:.6f} days",
         f"Dur  = {ans.tdur*24:.2f} hours",
         f"Depth= {ans.depth*1e6:.0f} ppm",
         f"SNR  = {ans.snr:.1f}"
@@ -1169,19 +1168,19 @@ def makeplot_pulse(time, flux, ans, mintime, Keptime, filename, plots):
     ax2 = plt.subplot(gs_bottom[1])
     
     # Zoom window: +/- 3 durations or fixed width
-    window = max(3 * dur, 0.5) # at least 0.5 days
+    window = max(3 * ans.tdur, 0.5) # at least 0.5 days
     
     # Mask based on x (plot coordinates)
-    mask = np.abs(x - t0_plot) < window
+    mask = np.abs(x - ans.epo) < window
     
     if np.sum(mask) > 0:
         ax2.plot(x[mask], y[mask], 'k.', markersize=3)
-        ax2.set_xlim(t0_plot - window, t0_plot + window)
+        ax2.set_xlim(ans.epo - window, ans.epo + window)
         
         # Plot box model
-        t_model = np.linspace(t0_plot - window, t0_plot + window, 1000)
+        t_model = np.linspace(ans.epo - window, ans.epo + window, 1000)
         f_model = np.ones_like(t_model)
-        in_transit = np.abs(t_model - t0_plot) < dur/2
+        in_transit = np.abs(t_model - ans.epo) < ans.tdur/2
         f_model[in_transit] = 1.0 - ans.depth
         
         ax2.plot(t_model, f_model, 'r-', alpha=0.7, linewidth=2)
@@ -1347,7 +1346,7 @@ def tls(tpy5_inputs, time=np.array([0]), flux=np.array([0]), dy=None):
     if tpy5_inputs.search_verbose:
         pprint.pprint(pars)
     t0 = t - tpy5_inputs.zerotime
-    model = tlsm.transitleastsquares(t0, f, dy=dy)
+    model = transitleastsquares(t0, f, dy=dy)
     tlsob = model.power(**pars, verbose=tpy5_inputs.search_verbose) # running TLS
     try: # this fails if tlsob.SR is not an array
         srU, srC = np.unique(tlsob.SR, return_counts=True)
@@ -1371,9 +1370,10 @@ def tls(tpy5_inputs, time=np.array([0]), flux=np.array([0]), dy=None):
         tlsans.SR       = tlsob.SR
 
     if tpy5_inputs.plots > 0:
-        timezeroed = t - np.min(t)
+        timezeroed = t - np.min(t) # because we set central=False for prep_timeflux
+        flux_norm = f - np.median(f) # and transitleastsquares does its own processing
         if np.isnan(tlsob.period) or tlsob.transit_count <= 1:
-            makeplot_pulse(timezeroed, f, tlsans, np.min(t), tpy5_inputs.zerotime, filename, tpy5_inputs.plots)
+            makeplot_pulse(timezeroed, flux_norm, tlsans, np.min(t), tpy5_inputs.zerotime, filename, tpy5_inputs.plots)
         else:
             makeplot(tlsob.periods, tlsob.power, timezeroed, f, np.min(t), tpy5_inputs.zerotime, \
             tlsob.T0, tlsob.period, tlsob.SDE, tlsob.snr, tlsob.duration, (1-tlsob.depth), filename, tpy5_inputs.plots)

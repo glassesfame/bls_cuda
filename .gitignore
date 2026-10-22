@@ -7,8 +7,9 @@ utils/
 depreciated/
 3288.01.h5
 .vscode/
-data/
-fmlRecovery.ipynb
+bls_testing/
+examples(old)/
+pytfit5/bls_cpu_og.py
 
 # Mac stuff
 .DS_Store

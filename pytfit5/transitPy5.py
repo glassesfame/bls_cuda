@@ -573,7 +573,6 @@ class tpy5_inputs_class:
         # Search parameters!
         self.filename = "filename.txt"  # Lightcurve filename
         self.lcdir    = ""              # Lightcurve directory
-        self.savedir  = ""              # Save directory (for plots as well)
         self.zerotime = 0.0             # Time offset (e.g., for Kepler/TESS)
         self.freq1    = -1              # Minimum frequency to search [c/d] (auto if -1)
         self.freq2    = -1              # Maximum frequency to search [c/d] (auto if -1)
@@ -599,8 +598,8 @@ class tpy5_inputs_class:
         self.arstarmin = 1.1        # truncate periods violating this bound
         self.upbuff = 0.2           # maximum mass/radius is 20% of the input
         self.lowbuff = 0.8          # minimum mass/radius is 80% of the input
-        self.stthres = 0.095        # if values are lower than this, then:
-        self.stbuff = 0.2           # resets the lower/upper buffer to 20%
+        self.stthres = 0.1          # if values are lower than this, then:
+        self.stbuff = 0.4           # resets the lower/upper buffer to 20%
 
 class exocat_class:
     def __init__(self):
