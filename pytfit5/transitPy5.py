@@ -16,6 +16,12 @@ import matplotlib.pyplot as plt  #MatPlotLib for some simple plots
 
 from scipy import stats #For Kernel Density Estimation
 
+# Handle the NumPy 1.x to 2.0 trapezoid rename seamlessly.
+if not hasattr(np, 'trapezoid'):
+    np.trapezoid = np.trapz
+if not hasattr(np, 'trapz'):
+    np.trapz = np.trapezoid
+
 # Nice for keeping an eye on progress.
 from tqdm import trange
 
@@ -27,6 +33,7 @@ from urllib.request import urlretrieve
 import http.client as httplib
 
 import json
+import h5py
 
 def fit_ttvs(phot, sol_fit, ntt=-1, tobs=-1, omc=-1, pflag = 0, pstart = 0):
 
@@ -1641,7 +1648,7 @@ def intperc(x,x_eval,kde1,perc=0.6827):
                 i1=i1+1
             #print('case2')
 
-        intval=np.trapz(kdea[j1:j2],x_eval[j1:j2])
+        intval=np.trapezoid(kdea[j1:j2],x_eval[j1:j2])
         #print(j1,j2,intval,kdea[j1test],kdea[j2test])
 
         #make sure we can break from loop
@@ -1658,6 +1665,207 @@ def intperc(x,x_eval,kde1,perc=0.6827):
 
     #print(x_eval[j1],x_eval[j2])
     return x_eval[j1],x_eval[j2];
+
+
+def save_mcmc_results(filename, phot, sol, chain, accept, burnin, params_to_fit, 
+                      x=None, beta=None, serr=None, params=None):
+    """
+    Save MCMC results and all necessary data to reproduce the analysis in an HDF5 file.
+    
+    Parameters
+    ----------
+    filename : str
+        Output HDF5 filename
+    phot : phot_class
+        Photometry data object
+    sol : transit_model_class
+        Transit model solution object
+    chain : ndarray
+        MCMC chain array
+    accept : ndarray
+        Acceptance rates array
+    burnin : int
+        Burnin period
+    params_to_fit : list of str
+        List of parameter names that were fit
+    x : ndarray, optional
+        Initial parameters for MCMC
+    beta : ndarray, optional
+        Initial step sizes for MCMC
+    serr : ndarray, optional
+        Error array for solution parameters
+    params : list, optional
+        MCMC configuration parameters [nsteps1, nsteps2, nsteps_inc, burninf, 
+        niter_cor, burnin_cor, nthin, nloopmax, converge_crit, buf_converge_crit]
+    
+    Notes
+    -----
+    This saves all data needed to:
+    - Reproduce the MCMC run with tmcmc.demcmcRoutine()
+    - Extract parameters with tmcmc.getParams()
+    - Regenerate plots and analysis
+    """
+    with h5py.File(filename, 'w') as f:
+        # Save photometry data
+        phot_group = f.create_group('photometry')
+        phot_group.create_dataset('time', data=phot.time)
+        phot_group.create_dataset('flux', data=phot.flux)
+        phot_group.create_dataset('ferr', data=phot.ferr)
+        phot_group.create_dataset('itime', data=phot.itime)
+        phot_group.create_dataset('tflag', data=phot.tflag)
+        phot_group.create_dataset('icut', data=phot.icut)
+        phot_group.create_dataset('flux_f', data=phot.flux_f)
+        
+        # Save solution parameters as array
+        sol_group = f.create_group('solution')
+        sol_array = sol.to_array()
+        sol_group.create_dataset('sol_array', data=sol_array)
+        sol_group.attrs['npl'] = sol.npl
+        
+        # Save solution errors if they exist
+        try:
+            err_array = sol.err_to_array()
+            sol_group.create_dataset('err_array', data=err_array)
+        except AttributeError:
+            pass
+
+        if hasattr(sol, 'dscale'):
+            sol_group.attrs['dscale'] = sol.dscale
+        if hasattr(sol, 'ddscale'):
+            sol_group.attrs['ddscale'] = sol.ddscale
+        
+        # Save MCMC results
+        mcmc_group = f.create_group('mcmc_results')
+        mcmc_group.create_dataset('chain', data=chain)
+        mcmc_group.create_dataset('accept', data=accept)
+        mcmc_group.create_dataset('burnin', data=burnin)
+        
+        # Save params_to_fit as string array
+        dt = h5py.string_dtype(encoding='utf-8')
+        mcmc_group.create_dataset('params_to_fit', data=np.array(params_to_fit, dtype=dt))
+        
+        # Save optional MCMC inputs
+        if x is not None:
+            mcmc_group.create_dataset('x', data=x)
+        if beta is not None:
+            mcmc_group.create_dataset('beta', data=beta)
+        if serr is not None:
+            mcmc_group.create_dataset('serr', data=serr)
+        if params is not None:
+            mcmc_group.create_dataset('params', data=np.array(params))
+            # Add descriptive attributes for params
+            param_names = ['nsteps1', 'nsteps2', 'nsteps_inc', 'burninf', 
+                          'niter_cor', 'burnin_cor', 'nthin', 'nloopmax', 
+                          'converge_crit', 'buf_converge_crit']
+            mcmc_group.attrs['param_names'] = np.array(param_names, dtype=dt)
+        
+        # Add metadata (h5py handles string encoding automatically)
+        f.attrs['creation_date'] = pd.Timestamp.now().isoformat()
+        f.attrs['pytfit5_version'] = '1.0.0'
+        
+    print(f"MCMC results saved to {filename}")
+
+
+def load_mcmc_results(filename):
+    """
+    Load MCMC results and all necessary data from an HDF5 file.
+    
+    Parameters
+    ----------
+    filename : str
+        Input HDF5 filename
+        
+    Returns
+    -------
+    phot : phot_class
+        Photometry data object
+    sol : transit_model_class
+        Transit model solution object
+    chain : ndarray
+        MCMC chain array
+    accept : ndarray
+        Acceptance rates array
+    burnin : int
+        Burnin period
+    params_to_fit : list of str
+        List of parameter names that were fit
+    metadata : dict
+        Dictionary containing optional saved data (x, beta, serr, params)
+        
+    Notes
+    -----
+    After loading, you can:
+    - Run tmcmc.getParams(chain, burnin, sol, params_to_fit) to extract parameters
+    - Run tmcmc.demcmcRoutine() with the saved inputs to extend the chain
+    - Use the phot and sol objects for plotting and analysis
+    
+    Example
+    -------
+    >>> phot, sol, chain, accept, burnin, params_to_fit, metadata = load_mcmc_results('results.h5')
+    >>> import pytfit5.transitmcmc as tmcmc
+    >>> sol_mcmc = tmcmc.getParams(chain, burnin, sol, params_to_fit)
+    """
+    with h5py.File(filename, 'r') as f:
+        # Load photometry data
+        phot = phot_class()
+        phot.time = f['photometry/time'][:]
+        phot.flux = f['photometry/flux'][:]
+        phot.ferr = f['photometry/ferr'][:]
+        phot.itime = f['photometry/itime'][:]
+        phot.tflag = f['photometry/tflag'][:]
+        phot.icut = f['photometry/icut'][:]
+        phot.flux_f = f['photometry/flux_f'][:]
+        
+        # Load solution
+        sol = transitm.transit_model_class()
+        sol_array = f['solution/sol_array'][:]
+        sol.from_array(sol_array)
+        
+        # Load solution errors if they exist
+        if 'err_array' in f['solution']:
+            err_array = f['solution/err_array'][:]
+            sol.load_errors(err_array)
+        if 'dscale' in f['solution'].attrs:
+            sol.dscale = f['solution'].attrs['dscale']
+        if 'ddscale' in f['solution'].attrs:
+            sol.ddscale = f['solution'].attrs['ddscale']
+        
+        # Load MCMC results
+        chain = f['mcmc_results/chain'][:]
+        accept = f['mcmc_results/accept'][:]
+        burnin = int(f['mcmc_results/burnin'][()])
+        
+        # Load params_to_fit
+        params_to_fit = [s.decode('utf-8') if isinstance(s, bytes) else s 
+                         for s in f['mcmc_results/params_to_fit'][:]]
+        
+        # Load optional data into metadata dictionary
+        metadata = {}
+        if 'x' in f['mcmc_results']:
+            metadata['x'] = f['mcmc_results/x'][:]
+        if 'beta' in f['mcmc_results']:
+            metadata['beta'] = f['mcmc_results/beta'][:]
+        if 'serr' in f['mcmc_results']:
+            metadata['serr'] = f['mcmc_results/serr'][:]
+        if 'params' in f['mcmc_results']:
+            metadata['params'] = f['mcmc_results/params'][:]
+            if 'param_names' in f['mcmc_results'].attrs:
+                param_names = [s.decode('utf-8') if isinstance(s, bytes) else s 
+                              for s in f['mcmc_results'].attrs['param_names']]
+                metadata['param_names'] = param_names
+        
+        # Load file metadata
+        if 'creation_date' in f.attrs:
+            metadata['creation_date'] = f.attrs['creation_date']
+        if 'pytfit5_version' in f.attrs:
+            metadata['pytfit5_version'] = f.attrs['pytfit5_version']
+            
+    print(f"MCMC results loaded from {filename}")
+    print(f"Chain shape: {chain.shape}")
+    print(f"Burnin: {burnin}")
+    print(f"Parameters fit: {params_to_fit}")
+    
+    return phot, sol, chain, accept, burnin, params_to_fit, metadata
 
 
 

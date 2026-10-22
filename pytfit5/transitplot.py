@@ -5,7 +5,8 @@ from pytfit5.transitmodel import transitModel
 from pytfit5.keplerian import transitDuration
 from pytfit5.effects import ttv_lininterp
 
-def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
+def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1,
+                filename=None, y1=None, y2=None, xdur_scale=1.5):
     """
     Plots a transit model. Assuming time is in days. Set flux=0 for no scatterplot.
 
@@ -13,6 +14,8 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
     sol: Transit model object with parameters
     nintg: Number of points inside the integration time
     pl_to_plot: Index of planet to plot. 1 being the first planet
+    y1, y2: Optional y-axis limits. If not provided, limits are computed from the data.
+    xdur_scale: Multiplier applied to the transit duration when setting x-axis limits.
     """
 
     # Read phot class
@@ -83,25 +86,197 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
         i2 = len(model_sorted)
     ymin = min(model_sorted[i1:i2])
     ymax = max(model_sorted[i1:i2])
-    y1 = ymin - 0.1*(ymax-ymin) - 3.0*stdev
-    y2 = ymax + 0.1*(ymax-ymin) + 3.0*stdev
-    if np.abs(y2 - y1) < 1.0e-10:
-        y1 = min(flux)
-        y2 = max(flux)
+    y1_auto = ymin - 0.1*(ymax-ymin) - 3.0*stdev
+    y2_auto = ymax + 0.1*(ymax-ymin) + 3.0*stdev
+    if np.abs(y2_auto - y1_auto) < 1.0e-10:
+        y1_auto = min(flux)
+        y2_auto = max(flux)
 
     #Make sure data outliers are seen.
-    y1 = np.min([y1, min(flux)])
-    y2 = np.max([y2, max(flux)])
+    y1_auto = np.min([y1_auto, min(flux)])
+    y2_auto = np.max([y2_auto, max(flux)])
+
+    if y1 is None:
+        y1 = y1_auto
+    if y2 is None:
+        y2 = y2_auto
 
     mpl.rcParams.update({'font.size': 22}) # Adjust font
+
+    # Generate smooth model for plotting
+    phase_smooth = np.linspace(-xdur_scale*tdur, xdur_scale*tdur, 1000)
+    # Convert phase (hours) to time (days) relative to t0
+    # phase = (t - t0) * 24
+    # t = phase/24 + t0
+    time_smooth = t0 + phase_smooth/24.0
+    itime_smooth = float(np.median(itime))
+
+    # Save original radii
+    rdr_orig = sol.rdr.copy()
+    # Remove other planets
+    for i in range(sol.npl):
+        if i != pl_to_plot:
+            sol.rdr[i] = 0
+    
+    # Calculate model with no TTVs
+    smooth_model = transitModel(sol, time_smooth, itime=itime_smooth, nintg=nintg, ntt=-1) - zpt
+    
+    # Restore radii
+    sol.rdr = rdr_orig
+
     plt.figure(figsize=(12,6)) # Adjust size of figure
     plt.scatter(phase, fplot, c="blue", s=100.0, alpha=0.35, edgecolors="none") #scatter plot
-    plt.plot(phase_sorted, model_sorted, c="red", lw=3.0)
+    plt.plot(phase_smooth, smooth_model, c="red", lw=3.0)
     plt.xlabel('Phase (hours)') #x-label
     plt.ylabel('Relative Flux') #y-label
-    plt.axis((-1.5*tdur, 1.5*tdur, y1, y2))
+    plt.axis((-xdur_scale*tdur, xdur_scale*tdur, y1, y2))
     plt.tick_params(direction="in")
-    plt.show()
+    if (filename==None):
+        plt.show()
+    else:
+        plt.savefig(filename, dpi=150)
+
+
+def plotTransitMCMC(chain, burnin, sol, params_to_fit, phot,
+                    pl_to_plot=1, n_samples=300, nintg=41,
+                    ntt=-1, tobs=-1, omc=-1, filename=None):
+    """
+    Plots MCMC posterior confidence intervals for a transit model.
+
+    Draws n_samples rows uniformly from chain[burnin:], reconstructs the transit
+    model for each draw, and overlays 1-sigma and 2-sigma shaded envelopes plus
+    the posterior median on the phase-folded photometry.
+
+    chain        : 2-D MCMC chain array, shape (n_steps, n_params)
+    burnin       : Number of leading rows to discard as burn-in
+    sol          : Transit model object; non-fitted parameters are taken from here
+    params_to_fit: Parameter name list, same as passed to genmcmcInput
+    phot         : Phot object containing the photometry
+    pl_to_plot   : Planet to plot, 1-based (default 1)
+    n_samples    : Number of posterior draws used to build the envelope (default 300)
+    nintg        : Oversampling points for time-convolution (default 41)
+    ntt, tobs, omc : TTV arrays forwarded to transitModel when folding the data
+    filename     : If given, saves figure to this path; otherwise displays interactively.
+
+    Returns the matplotlib Figure.
+    """
+    from pytfit5.transitmcmc import _get_fit_parameter_layout
+    from pytfit5.transitmodel import nb_st_param, nb_pl_param, transit_model_class
+
+    pl_idx = pl_to_plot - 1
+    _rdr_off = 3  # rdr is the 4th entry (index 3) in the planet parameter block
+
+    # --- Decode chain samples back to full sol arrays ---
+    id_to_fit, log_space_params, _ = _get_fit_parameter_layout(sol, params_to_fit)
+    sol_base = sol.to_array()
+
+    post_chain = chain[burnin:, :]
+    n_post = post_chain.shape[0]
+    rng = np.random.default_rng()
+    draw_idx = rng.choice(n_post, size=min(n_samples, n_post), replace=False)
+    samples = post_chain[draw_idx]
+
+    # Median posterior solution — used to subtract other planets from the data scatter
+    mm = np.median(post_chain, axis=0)
+    sol_med = sol_base.copy()
+    for i, ind in enumerate(id_to_fit):
+        sol_med[ind] = np.exp(mm[i]) if ind in log_space_params else mm[i]
+
+    # --- Phase grid for smooth model ---
+    t0_ref  = sol_med[nb_st_param + pl_idx * nb_pl_param + 0]  # t0
+    per_ref = sol_med[nb_st_param + pl_idx * nb_pl_param + 1]  # per
+    zpt_ref = sol_med[7]                                         # zpt
+
+    sol_tmp = transit_model_class()
+    sol_tmp.from_array(sol_med)
+    tdur_ref = transitDuration(sol_tmp, pl_idx) * 24  # hours
+    if tdur_ref < 0.01 or np.isnan(tdur_ref):
+        tdur_ref = 2.0
+
+    phase_smooth = np.linspace(-1.5 * tdur_ref, 1.5 * tdur_ref, 500)
+    time_smooth  = t0_ref + phase_smooth / 24.0
+    itime_smooth = float(np.median(phot.itime))
+
+    # --- Evaluate model for each posterior sample ---
+    model_curves = np.empty((len(samples), len(phase_smooth)))
+    for s_i, row in enumerate(samples):
+        sol_s = sol_base.copy()
+        for i, ind in enumerate(id_to_fit):
+            sol_s[ind] = np.exp(row[i]) if ind in log_space_params else row[i]
+        # Zero out other planets so we only see the target transit
+        for pi in range(sol.npl):
+            if pi != pl_idx:
+                sol_s[nb_st_param + pi * nb_pl_param + _rdr_off] = 0.0
+        zpt_s = sol_s[7]
+        model_curves[s_i] = transitModel(sol_s, time_smooth, itime=itime_smooth,
+                                         nintg=nintg, ntt=-1) - zpt_s
+
+    # Percentile envelopes: 2.5, 16, 50, 84, 97.5
+    p = np.percentile(model_curves, [2.5, 16, 50, 84, 97.5], axis=0)
+
+    # --- Phase-fold the data (mirrors plotTransit) ---
+    sel  = phot.icut == 0
+    time  = phot.time[sel]
+    flux  = phot.flux_f[sel]
+    if np.isclose(np.median(flux), 0, atol=0.2):
+        flux = flux + 1
+    itime = phot.itime[sel]
+
+    # Subtract the other planets from the data using the median sol
+    sol_other = sol_med.copy()
+    sol_other[nb_st_param + pl_idx * nb_pl_param + _rdr_off] = 0.0
+    tmodel_other = transitModel(sol_other, time, itime, nintg, ntt, tobs, omc)
+    fplot = flux - tmodel_other + 1
+
+    ph1 = t0_ref / per_ref - np.floor(t0_ref / per_ref)
+    phase_data = np.empty(len(time))
+    for i, x in enumerate(time):
+        ttcor = 0.0
+        if type(ntt) is not int and ntt[pl_idx] > 0:
+            ttcor = ttv_lininterp(tobs, omc, ntt, x, pl_idx)
+        t = x - ttcor
+        phase_data[i] = (t / per_ref - np.floor(t / per_ref) - ph1) * per_ref * 24
+        if phase_data[i] >  0.5 * per_ref * 24:
+            phase_data[i] -= per_ref * 24
+        if phase_data[i] < -0.5 * per_ref * 24:
+            phase_data[i] += per_ref * 24
+
+    # --- Axis limits ---
+    i1, i2 = np.searchsorted(phase_smooth, (-tdur_ref, tdur_ref))
+    if i1 == i2:
+        i1, i2 = 0, len(phase_smooth)
+    ymin_m = p[0, i1:i2].min()
+    ymax_m = p[4, i1:i2].max()
+    stdev  = np.std(fplot)
+    y1 = ymin_m - 0.1 * (ymax_m - ymin_m) - 3.0 * stdev
+    y2 = ymax_m + 0.1 * (ymax_m - ymin_m) + 3.0 * stdev
+    y1 = min(y1, fplot.min())
+    y2 = max(y2, fplot.max())
+
+    mpl.rcParams.update({'font.size': 22})
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    ax.scatter(phase_data, fplot, c="blue", s=100, alpha=0.35,
+               edgecolors="none", zorder=2, label="Data")
+    ax.fill_between(phase_smooth, p[0], p[4], color="orange", alpha=0.25, label="2σ")
+    ax.fill_between(phase_smooth, p[1], p[3], color="orange", alpha=0.50, label="1σ")
+    ax.plot(phase_smooth, p[2], color="red", lw=2.5, label="Median", zorder=3)
+
+    ax.set_xlabel("Phase (hours)")
+    ax.set_ylabel("Relative Flux")
+    ax.set_xlim(-1.5 * tdur_ref, 1.5 * tdur_ref)
+    ax.set_ylim(y1, y2)
+    ax.tick_params(direction="in")
+    ax.legend(fontsize=14, loc="lower right")
+
+    plt.tight_layout()
+    if filename is None:
+        plt.show()
+    else:
+        fig.savefig(filename, dpi=150)
+
+    return fig
+
 
 def printParams(sol):
     """
@@ -114,6 +289,9 @@ def printParams(sol):
         "ρ* (g/cm³)": "rho", "c1": "nl1", "c2": "nl2", "q1": "nl3", "q2": "nl4",
         "Dilution": "dil", "Velocity Offset": "vof", "Photometric zero point": "zpt"
     }
+
+    if hasattr(sol, "dscale"):
+        stellarDict["Error scale factor"] = "dscale"
 
     planetDict = {
         "t0 (days)": "t0", "Period (days)": "per", "Impact parameter": "bb", "Rp/R*": "rdr",

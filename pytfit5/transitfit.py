@@ -4,6 +4,13 @@ import pytfit5.transitmodel as transitm
 import pytfit5.transitPy5 as tpy5
 import pytfit5.bls_cpu as gbls
 
+
+def _coerce_array(values, dtype):
+    array = np.asarray(values, dtype=dtype)
+    if not array.flags.c_contiguous:
+        array = np.ascontiguousarray(array)
+    return array
+
 def analyseLightCurve(gbls_inputs):
     """
     Function to call to analyse a light curve and get the best-fit parameters
@@ -85,7 +92,7 @@ def createBounds(time, id_to_fit, sol_obj):
 
     # Rho and Rp/Rs are in log space
     lower_bound = np.array([np.log(1e-4), 0, -1, 0, 0, 0, -np.inf, -np.inf,      0, -np.inf, 0, -np.inf, -1, -1, -np.inf, -np.inf, -np.inf, -np.inf])
-    upper_bound = np.array([np.log(1e3),  2,  1, 1, 1, 1,  np.inf,  np.inf, np.inf,  np.inf, 2,       0,  1,  1,  np.inf,  np.inf,  np.inf,  np.inf])
+    upper_bound = np.array([np.log(1e3),  2,  1, 1, 1, 1,  np.inf,  np.inf, np.inf,  np.inf, 2,       1,  1,  1,  np.inf,  np.inf,  np.inf,  np.inf])
 
     # Expand bounds for multiple planets
     for i in range(sol_obj.npl - 1):
@@ -112,15 +119,20 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
         ntt = np.zeros(n_planet, dtype="int32") # Number of TTVs measured 
         tobs = np.zeros((n_planet, nb_pts)) # Time stamps of TTV measurements (days)
         omc = np.zeros((n_planet, nb_pts)) # TTV measurements (O-C) (days)
+    else:
+        ntt = _coerce_array(ntt, np.int32)
+        tobs = _coerce_array(tobs, np.float64)
+        omc = _coerce_array(omc, np.float64)
 
     # Read phot class
-    time = phot.time[(phot.icut == 0) & (phot.tflag == 1)]
-    flux = phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)] # - np.median(phot.flux) + 1
-    ferror = phot.ferr[(phot.icut == 0) & (phot.tflag == 1)]
-    itime = phot.itime[(phot.icut == 0) & (phot.tflag == 1)]
+    selection = (phot.icut == 0) & (phot.tflag == 1)
+    time = _coerce_array(phot.time[selection], np.float64)
+    flux = _coerce_array(phot.flux_f[selection], np.float64) # - np.median(phot.flux) + 1
+    ferror = _coerce_array(phot.ferr[selection], np.float64)
+    itime = _coerce_array(phot.itime[selection], np.float64)
     
     # Transform solution object to array
-    sol = sol_obj.to_array()
+    sol = _coerce_array(sol_obj.to_array(), np.float64)
 
     log_space_params = np.array([transitm.var_to_ind["rho"], transitm.var_to_ind["rdr"]]) # Rho and Rp/Rs are in log space
     id_to_fit = np.array([transitm.var_to_ind[param] for param in params_to_fit])
@@ -154,7 +166,7 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
             sol[i] = np.log(sol[i])
 
 
-    res = least_squares(wrapperTransit, sol[id_to_fit], bounds=bounds, \
+    res = least_squares(wrapperTransit, _coerce_array(sol[id_to_fit], np.float64), bounds=bounds, \
                         args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc))
 
     # res = least_squares(wrapperTransit, sol[id_to_fit], bounds=bounds, \
@@ -304,3 +316,112 @@ def calculate_parameter_errors(opt_result, residual_func_returns_weighted=True):
              covariance_matrix = None
 
     return best_fit_params, param_errors, covariance_matrix
+
+
+def calculate_reduced_chisq_and_error_scale(sol_obj, phot, nintg=41, ntt=-1, tobs=-1, omc=-1):
+    """
+    Calculate reduced chi-square for a fitted transit model and return the error scaling factor
+    needed to achieve reduced chi-square = 1.
+    
+    This function uses the same data cuts as fitTransitModel: (phot.icut == 0) & (phot.tflag == 1)
+    
+    Parameters
+    ----------
+    sol_obj : transit_model_class
+        Fitted transit model object containing the best-fit parameters
+    phot : phot_class
+        Photometry object containing time, flux_f, ferr, itime, icut, and tflag
+    nintg : int, optional
+        Number of integration points for transit model (default: 41)
+    ntt : int or array, optional
+        Number of TTVs (default: -1, meaning no TTVs)
+    tobs : array, optional
+        Time stamps of TTV measurements (default: -1)
+    omc : array, optional
+        TTV measurements (O-C) (default: -1)
+    
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'chi_square': float, the chi-square value
+        - 'dof': int, degrees of freedom (n_data - n_params)
+        - 'reduced_chi_square': float, chi-square / dof
+        - 'error_scale_factor': float, factor to multiply phot.ferr by to get reduced chi-square = 1
+        - 'n_data': int, number of data points used
+        - 'n_params': int, number of fitted parameters (from covariance matrix)
+    
+    Notes
+    -----
+    The error_scale_factor is calculated as sqrt(reduced_chi_square).
+    To rescale errors: phot.ferr *= result['error_scale_factor']
+    """
+    
+    n_planet = sol_obj.npl
+    nb_pts = len(phot.time[(phot.icut == 0) & (phot.tflag == 1)])
+    
+    # Handle TTV inputs
+    if type(ntt) is int:
+        ntt = np.zeros(n_planet, dtype="int32")
+        tobs = np.zeros((n_planet, nb_pts))
+        omc = np.zeros((n_planet, nb_pts))
+    else:
+        ntt = _coerce_array(ntt, np.int32)
+        tobs = _coerce_array(tobs, np.float64)
+        omc = _coerce_array(omc, np.float64)
+    
+    # Apply the SAME data cuts as fitTransitModel
+    mask = (phot.icut == 0) & (phot.tflag == 1)
+    time = _coerce_array(phot.time[mask], np.float64)
+    flux = _coerce_array(phot.flux_f[mask], np.float64)
+    ferror = _coerce_array(phot.ferr[mask], np.float64)
+    itime = _coerce_array(phot.itime[mask], np.float64)
+    
+    n_data = len(time)
+    
+    # Convert solution object to array
+    sol = _coerce_array(sol_obj.to_array(), np.float64)
+    
+    # Calculate the model
+    y_model = transitm._transitModel(sol, time, itime, nintg, ntt, tobs, omc)
+    
+    # Calculate residuals
+    residuals = flux - y_model
+    
+    # Calculate chi-square
+    chi_square = np.sum((residuals / ferror)**2)
+    
+    # Estimate number of fitted parameters from the error array
+    # Parameters with non-zero errors are the ones that were fitted
+    err_array = sol_obj.err_to_array()
+    n_params = np.sum(err_array > 0)
+    
+    # Calculate degrees of freedom
+    dof = n_data - n_params
+    
+    if dof <= 0:
+        print(f"Warning: Non-positive degrees of freedom (dof={dof}). Cannot calculate reduced chi-square.")
+        return {
+            'chi_square': chi_square,
+            'dof': dof,
+            'reduced_chi_square': np.nan,
+            'error_scale_factor': np.nan,
+            'n_data': n_data,
+            'n_params': n_params
+        }
+    
+    # Calculate reduced chi-square
+    reduced_chi_square = chi_square / dof
+    
+    # Calculate error scaling factor
+    # To achieve reduced_chi_square = 1, we need to scale errors by sqrt(reduced_chi_square)
+    error_scale_factor = np.sqrt(reduced_chi_square)
+    
+    return {
+        'chi_square': chi_square,
+        'dof': dof,
+        'reduced_chi_square': reduced_chi_square,
+        'error_scale_factor': error_scale_factor,
+        'n_data': n_data,
+        'n_params': n_params
+    }

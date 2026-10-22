@@ -24,6 +24,50 @@ This package provides tools for transit search and fitting, including Box-Least-
 
 ## Features
 
+### BLS Transit Search
+
+pytfit5 provides **three search modes** for different scenarios:
+
+1. **Periodic Transit Search (`bls`)** - Standard BLS for repeating transits
+   - Searches for periodic signals
+   - Returns period, epoch, duration, depth
+   - Best for: Known repeating planets
+
+2. **Single Event Search (`compute_pulse_search`)** - Fast single-event detection
+   - Searches for one-time events at all times and durations
+   - Much faster than full BLS (~100x speedup)
+   - Best for: Single transits, stellar flares, fast screening
+
+3. **Combined Search (`bls_pulse`)** - Runs both, returns best
+   - Automatically chooses between periodic and single event
+   - Returns whichever has higher SNR
+   - Best for: Exploratory analysis, unknown signal type
+
+**Example:**
+
+```python
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
+
+# Configure search
+inputs = tpy5.tpy5_inputs_class()
+inputs.freq1 = 1.0 / 60.0  # Search down to 60-day periods
+inputs.freq2 = 2.0
+inputs.pulse_min_duration_hours = 1.0  # For pulse search
+inputs.pulse_max_duration_hours = 8.0
+
+# Run combined search
+result = gbls.bls_pulse(inputs, time, flux)
+
+# Check result type
+if result.bper == 0:
+    print("Single pulse detected!")
+else:
+    print(f"Periodic signal: P = {result.bper:.2f} days")
+```
+
+See [API.md](API.md) for detailed documentation of all three search modes.
+
 ### Synthetic Lightcurve Generation
 Generate realistic synthetic transit lightcurves with configurable stellar noise:
 
@@ -124,7 +168,7 @@ The `tpy5_inputs_class()` is a **unified configuration class** that controls all
 #### Transit Search Parameters
 - `filename` (str, default: "filename.txt"): Lightcurve filename
 - `lcdir` (str, default: ""): Lightcurve directory path
-- `zerotime` (float, default: 0.0): Time offset for epochs
+- `zerotime` (float, default: 0.0): Time offset subtracted from epochs (e.g., set to 1325.0 for TESS data in BTJD format)
 - `freq1` (float, default: -1): Minimum search frequency in cycles/day (auto if -1)
 - `freq2` (float, default: -1): Maximum search frequency in cycles/day (auto if -1)
 - `plots` (int, default: 1): Plot mode (0=none, 1=display, 2=save+display, 3=save only)
@@ -138,13 +182,18 @@ The `tpy5_inputs_class()` is a **unified configuration class** that controls all
 - `oneoverf_correction` (bool, default: True): Apply 1/f noise correction for long periods
 
 #### TLS Transit Search Parameters
-- `search_verbose` (bool, default: False): To print or not to print TLS input parameters and set transitleastsquares to verbose=True
-- `pars` (dict, default: {}): Additional parameters to feed into TLS. Overrides default settings, e.g. maximum/minimum stellar parameters
-- `arstarmin` (float, default: 1.1): Imposes an astrophysical constraint on the minimum period; if  overrides `< freq2`, overrides
+- `search_verbose` (bool, default: False): Prints TLS input parameters and sets transitleastsquares' verbose=True
+- `pars` (dict, default: {}): Additional TLS parameters and overrides defaults and class attribute
+- `arstarmin` (float, default: 1.1): Imposes an astrophysical constraint on the minimum period; if so, overrides `< freq2`
 - `upbuff` (float, default: 0.2): % of stellar parameters to calculate maximum (i.e. 120%)
 - `lowbuff` (float, default: 0.8): % of stellar parameters to calculate minimum (i.e. 20%)
-- `stthres` (float, default: 0.095): threshold value for the minimum `rstar` or `mstar` before adjusting `lowbuff`
-- `stbuff` (float, default: 0.2): alternative `lowbuff` if the minimum of stellar parameters are calculated < `stthres`
+- `stthres` (float, default: 0.1): threshold for  minimum `rstar` or `mstar` before adjusting `lowbuff`
+- `stbuff` (float, default: 0.4): alternative `lowbuff` if below `stthres`
+
+#### Pulse Search Parameters (for single-event detection)
+- `pulse_min_duration_hours` (float, default: 1.0): Minimum event duration to search (hours)
+- `pulse_max_duration_hours` (float, default: 12.0): Maximum event duration to search (hours)
+- `pulse_bin_duration_days` (float, default: 10.0/1440.0): Binning resolution (~10 minutes)
 
 **Example Usage:**
 ```python
@@ -204,9 +253,6 @@ fig = transitp.plot_lightcurve_summary(phot, bls_ans=gbls_ans, tpy5_inputs=tpy5_
 - Automatically marks transit locations in time series
 - Transit closeup shows ±1 duration window around transit center
 - Statistics panel displays period, T0, SNR, duration, and depth
-
-### ⚠️ Deprecation Notice
-**Command Line Usage:** Previous versions of this code allowed for execution via command line scripts. This method is **deprecated**. Please use the Python API as described above.
 
 ## Dependencies
 This package requires the following libraries (installed automatically):

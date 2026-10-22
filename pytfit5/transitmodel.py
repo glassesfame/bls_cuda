@@ -35,6 +35,8 @@ class transit_model_class:
         self.dil = 0.0      # Dilution
         self.vof = 0.0      # Velocity offset
         self.zpt = 0.0      # Photometric zero point
+        self.dscale = 1.0   # Multiplicative error-bar scale for MCMC likelihood
+        self.ddscale = 0.0  # Error on multiplicative error-bar scale
         self.npl = 1        # Number of planets
         self.t0  = [0.0]    # Center of transit time (days)
         self.per = [1.0]    # Orbital period (days)
@@ -156,13 +158,21 @@ def transitModel(sol, time, itime=-1, nintg=41, ntt=-1, tobs=-1, omc=-1):
     return: Array containing the flux values. Same length as the time array
     """
 
+    def _coerce_array(values, dtype):
+        array = np.asarray(values, dtype=dtype)
+        if not array.flags.c_contiguous:
+            array = np.ascontiguousarray(array)
+        return array
+
     # Handle parameters
     if isinstance(sol, (np.ndarray, list)):
-        sol_a = sol
+        sol_a = _coerce_array(sol, np.float64)
         n_planet = (len(sol) - nb_st_param) // nb_pl_param
     else:
-        sol_a = sol.to_array()
+        sol_a = _coerce_array(sol.to_array(), np.float64)
         n_planet = sol.npl
+
+    time = _coerce_array(time, np.float64)
 
     nb_pts = len(time)
 
@@ -172,12 +182,18 @@ def transitModel(sol, time, itime=-1, nintg=41, ntt=-1, tobs=-1, omc=-1):
             itime = np.full(nb_pts, 0.020434) # 30 minutes integration time
         else:
             itime = np.full(nb_pts, float(itime))
+    else:
+        itime = _coerce_array(itime, np.float64)
 
     # Handle TTV inputs
     if type(ntt) is int:
         ntt = np.zeros(n_planet, dtype="int32") # Number of TTVs measured 
         tobs = np.zeros((n_planet, nb_pts)) # Time stamps of TTV measurements (days)
         omc = np.zeros((n_planet, nb_pts)) # TTV measurements (O-C) (days)
+    else:
+        ntt = _coerce_array(ntt, np.int32)
+        tobs = _coerce_array(tobs, np.float64)
+        omc = _coerce_array(omc, np.float64)
     
     return _transitModel(sol_a, time, itime, nintg, ntt, tobs, omc)
 

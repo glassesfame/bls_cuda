@@ -73,7 +73,7 @@ Unified configuration class for BLS search, detrending, and transit fitting para
 |-----------|------|---------|-------------|
 | `filename` | str | `"filename.txt"` | Input light curve file path |
 | `lcdir` | str | `""` | Light curve directory |
-| `zerotime` | float | `0.0` | Reference time offset (days) |
+| `zerotime` | float | `0.0` | Reference time offset subtracted from epochs (days). Use this to match your time system (e.g., BJD-2457000) |
 | `freq1` | float | `-1` | Minimum search frequency (c/d) |
 | `freq2` | float | `-1` | Maximum search frequency (c/d) |
 | `ofac` | float | `8.0` | Oversampling factor for frequency grid |
@@ -87,6 +87,14 @@ Unified configuration class for BLS search, detrending, and transit fitting para
 | `return_spectrum` | bool | `False` | If True, return full BLS spectrum in result |
 | `oneoverf_correction` | bool | `False` | Enable 1/f baseline correction |
 | `oneoverf_extrapolate` | bool | `True` | Enable baseline/noise extrapolation for long periods |
+
+**Pulse Search Parameters (for single-event detection):**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pulse_min_duration_hours` | float | `1.0` | Minimum event duration to search (hours) |
+| `pulse_max_duration_hours` | float | `12.0` | Maximum event duration to search (hours) |
+| `pulse_bin_duration_days` | float | `10.0/1440.0` | Binning resolution (~10 minutes) |
 
 **Detrending Parameters:**
 
@@ -151,58 +159,219 @@ Results class storing BLS detection information.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `epo` | float | Best-fit epoch (days) |
-| `bper` | float | Best-fit period (days) |
+| `epo` | float | Best-fit epoch (days). For periodic: first transit time. For pulse: event time |
+| `bper` | float | Best-fit period (days). **Set to 0 for single pulse detections** |
 | `bpower` | float | Maximum BLS power |
 | `snr` | float | Signal-to-noise ratio |
-| `tdur` | float | Transit duration (hours) |
-| `depth` | float | Transit depth (fractional) |
+| `tdur` | float | Transit/event duration (days) |
+| `depth` | float | Transit/event depth (fractional) |
 | `periods` | np.ndarray | Full period array (if `return_spectrum=True`) |
 | `power` | np.ndarray | Full power array (if `return_spectrum=True`) |
 | `freqs` | np.ndarray | Full frequency array (if `return_spectrum=True`) |
+
+**Note:** When using `bls_pulse()`, check `ans.bper`:
+- `bper > 0`: Periodic signal detected (repeating transits)
+- `bper == 0`: Single pulse detected (one-time event)
 
 ---
 
 ### Core Functions
 
-#### `bls(time, flux, inputs)`
+pytfit5 provides three search modes to accommodate different scenarios:
 
-Main BLS search function.
+1. **`bls()`** - Periodic transit search only
+2. **`compute_pulse_search()`** - Single event search only (fast)
+3. **`bls_pulse()`** - Combined search (runs both, returns best)
+
+---
+
+#### `bls(inputs, time, flux)`
+
+**Periodic transit search** - Searches for repeating transit signals.
 
 **Parameters:**
 
+- `inputs` (tpy5_inputs_class): BLS configuration
 - `time` (np.ndarray): Time array (days)
-- `flux` (np.ndarray): Flux array (normalized)
-- `inputs` (gbls_inputs_class): BLS configuration
+- `flux` (np.ndarray): Flux array (normalized around 1)
 
 **Returns:**
 
-- `ans` (gbls_ans_class): Detection results
-- `freqs` (np.ndarray): Frequency grid (c/d)
-- `power` (np.ndarray): BLS power spectrum
+- `ans` (gbls_ans_class): Detection results with `bper > 0`
+
+**When to use:**
+- You expect **repeating transits** (planet with multiple transits observed)
+- You want the standard BLS periodogram
+- You need high precision period determination
 
 **Example:**
 
 ```python
-import pytfit5.gbls as gbls
-import numpy as np
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
 
 # Load or generate data
 time, flux = gbls.readfile("lightcurve.txt")
 
 # Configure search
-inputs = gbls.gbls_inputs_class()
-inputs.freq1 = 0.05
-inputs.freq2 = 2.0
+inputs = tpy5.tpy5_inputs_class()
+inputs.freq1 = 0.05  # Minimum frequency (max period ~20 days)
+inputs.freq2 = 2.0   # Maximum frequency (min period 0.5 days)
 inputs.normalize = "iterative_baseline"
+inputs.oneoverf_correction = True
 
-# Run BLS
-ans, freqs, power = gbls.bls(time, flux, inputs)
+# Run periodic BLS
+ans = gbls.bls(inputs, time, flux)
 
 print(f"Period: {ans.bper:.6f} days")
 print(f"Epoch: {ans.epo:.6f} days")
 print(f"SNR: {ans.snr:.2f}")
 ```
+
+---
+
+#### `compute_pulse_search(time, flux, min_duration_hours=1.0, max_duration_hours=12.0, bin_duration_days=None)`
+
+**Single event search** - Fast detection of one-time events (no periodicity assumed).
+
+**Parameters:**
+
+- `time` (np.ndarray): Time array (days), **must start at 0** (pre-shifted)
+- `flux` (np.ndarray): Flux array, **must be zero-centered** (pre-processed)
+- `min_duration_hours` (float): Minimum event duration to search (hours)
+- `max_duration_hours` (float): Maximum event duration to search (hours)
+- `bin_duration_days` (float, optional): Binning resolution (default: 10 minutes)
+
+**Returns:**
+
+- `result` (dict or None): Detection results containing:
+  - `'t0'`: Event center time in time array frame
+  - `'duration'`: Event duration (days)
+  - `'depth'`: Event depth (negative for dips)
+  - `'snr'`: Signal-to-noise ratio
+  - `'spectrum_duration'`: Duration grid (hours)
+  - `'spectrum_snr'`: SNR vs duration spectrum
+
+**When to use:**
+- **Single transit events** (planet transits only once in dataset)
+- **Stellar flares** or other one-off astrophysical events  
+- **Fast screening** (much faster than full BLS)
+- You want to control preprocessing explicitly
+
+**Important:** This is a **low-level function** - you must preprocess the data:
+1. Shift time to start at 0: `time_proc = time - np.min(time)`
+2. Zero-center flux: `flux_proc = flux - np.median(flux)`
+
+**Example:**
+
+```python
+import pytfit5.bls_cpu as gbls
+import numpy as np
+
+# Load data
+time, flux = gbls.readfile("lightcurve.txt")
+
+# REQUIRED: Preprocess data
+mintime = np.min(time)
+time_proc = time - mintime  # Shift to start at 0
+flux_proc = flux - np.median(flux)  # Zero-center
+
+# Run pulse search only
+result = gbls.compute_pulse_search(
+    time_proc,
+    flux_proc,
+    min_duration_hours=1.0,   # 1-12 hour events
+    max_duration_hours=12.0
+)
+
+if result is not None:
+    # Adjust T0 back to original time frame
+    t0_original = result['t0'] + mintime
+    print(f"Event time: {t0_original:.6f} days")
+    print(f"Duration: {result['duration']*24:.2f} hours")
+    print(f"SNR: {result['snr']:.2f}")
+```
+
+---
+
+#### `bls_pulse(inputs, time, flux)`
+
+**Combined periodic + pulse search** - Runs both searches, returns the best detection.
+
+**Parameters:**
+
+- `inputs` (tpy5_inputs_class): Configuration with both BLS and pulse parameters
+- `time` (np.ndarray): Time array (days)
+- `flux` (np.ndarray): Flux array (normalized around 1)
+
+**Returns:**
+
+- `ans` (gbls_ans_class): Best detection (highest SNR) with:
+  - `bper > 0`: Periodic signal won
+  - `bper == 0`: Single pulse won
+
+**When to use:**
+- **Exploratory analysis** when signal type is unknown
+- Searching for both repeating and single transits
+- You want the algorithm to choose automatically
+
+**Example:**
+
+```python
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
+
+# Configure search (includes both periodic and pulse parameters)
+inputs = tpy5.tpy5_inputs_class()
+
+# Periodic search settings
+inputs.freq1 = 1.0 / 60.0  # Down to 60-day periods
+inputs.freq2 = 2.0
+inputs.normalize = "iterative_baseline"
+inputs.oneoverf_correction = True
+
+# Pulse search settings
+inputs.pulse_min_duration_hours = 1.0
+inputs.pulse_max_duration_hours = 8.0
+
+inputs.plots = 1  # Show diagnostic plots
+
+# Run combined search
+ans = gbls.bls_pulse(inputs, time, flux)
+
+# Check what was found
+if ans.bper == 0:
+    print(">> SINGLE PULSE DETECTED")
+    print(f"Event time: {ans.epo:.6f} days")
+    print(f"Duration: {ans.tdur*24:.2f} hours")
+else:
+    print(">> PERIODIC SIGNAL DETECTED")
+    print(f"Period: {ans.bper:.6f} days")
+    print(f"Epoch: {ans.epo:.6f} days")
+
+print(f"SNR: {ans.snr:.2f}")
+print(f"Depth: {ans.depth*1e6:.1f} ppm")
+```
+
+**How it works:**
+1. Runs full periodic BLS search
+2. Runs pulse search across all times and durations
+3. Compares SNR values
+4. Returns result with highest SNR
+5. Generates appropriate plots based on winner
+
+---
+
+### Function Comparison
+
+| Feature | `bls()` | `compute_pulse_search()` | `bls_pulse()` |
+|---------|---------|--------------------------|---------------|
+| **Speed** | Slow | Very Fast | Slow (runs both) |
+| **Finds periodic signals** | ✓ | ✗ | ✓ |
+| **Finds single events** | ✗ | ✓ | ✓ |
+| **Preprocessing** | Automatic | Manual | Automatic |
+| **Returns period** | Always > 0 | N/A | 0 if pulse wins |
+| **Best for** | Known repeating | Single transits | Unknown signal type |
 
 ---
 
@@ -737,6 +906,118 @@ Run MCMC analysis on transit lightcurve.
 
 - `samples` (np.ndarray): MCMC chain samples
 - `best_fit` (dict): Maximum likelihood parameters
+
+---
+
+## Saving and Loading MCMC Results (`pytfit5.tpy5`)
+
+Save and load complete MCMC analysis results to HDF5 files for reproducibility and later analysis.
+
+### Functions
+
+#### `save_mcmc_results(filename, phot, sol, chain, accept, burnin, params_to_fit, x=None, beta=None, serr=None, params=None)`
+
+Save MCMC results and all necessary data to an HDF5 file.
+
+**Parameters:**
+
+- `filename` (str): Output HDF5 filename
+- `phot` (phot_class): Photometry data object
+- `sol` (transit_model_class): Transit model solution object
+- `chain` (np.ndarray): MCMC chain array
+- `accept` (np.ndarray): Acceptance rates array
+- `burnin` (int): Burnin period
+- `params_to_fit` (list of str): List of parameter names that were fit
+- `x` (np.ndarray, optional): Initial parameters for MCMC
+- `beta` (np.ndarray, optional): Initial step sizes for MCMC
+- `serr` (np.ndarray, optional): Error array for solution parameters
+- `params` (list, optional): MCMC configuration parameters
+
+**Saved Data:**
+
+The HDF5 file contains:
+- **Photometry group**: time, flux, ferr, itime, tflag, icut, flux_f
+- **Solution group**: sol_array, err_array (if available), npl
+- **MCMC results group**: chain, accept, burnin, params_to_fit, and optional x, beta, serr, params
+- **Metadata**: creation_date, pytfit5_version
+
+**Example:**
+
+```python
+import pytfit5.transitPy5 as tpy5
+import pytfit5.transitmcmc as tmcmc
+
+# After running MCMC analysis
+chain, accept, burnin = tmcmc.demcmcRoutine(x, beta, phot_cut, sol_a, serr, params, lnprob)
+
+# Save all results
+tpy5.save_mcmc_results(
+    filename='mcmc_results.h5',
+    phot=phot_cut,
+    sol=sol,
+    chain=chain,
+    accept=accept,
+    burnin=burnin,
+    params_to_fit=params_to_fit,
+    x=x,
+    beta=beta,
+    serr=serr,
+    params=params
+)
+```
+
+---
+
+#### `load_mcmc_results(filename)`
+
+Load MCMC results and all necessary data from an HDF5 file.
+
+**Parameters:**
+
+- `filename` (str): Input HDF5 filename
+
+**Returns:**
+
+- `phot` (phot_class): Photometry data object
+- `sol` (transit_model_class): Transit model solution object
+- `chain` (np.ndarray): MCMC chain array
+- `accept` (np.ndarray): Acceptance rates array
+- `burnin` (int): Burnin period
+- `params_to_fit` (list of str): List of parameter names that were fit
+- `metadata` (dict): Dictionary containing optional saved data (x, beta, serr, params)
+
+**Example:**
+
+```python
+import pytfit5.transitPy5 as tpy5
+import pytfit5.transitmcmc as tmcmc
+import pytfit5.transitplot as transitp
+
+# Load saved MCMC results
+phot, sol, chain, accept, burnin, params_to_fit, metadata = tpy5.load_mcmc_results('mcmc_results.h5')
+
+# Extract parameters from the chain
+sol_mcmc = tmcmc.getParams(chain, burnin, sol, params_to_fit)
+
+# Print results
+transitp.printParams(sol_mcmc)
+
+# Plot the transit model
+transitp.plotTransit(phot, sol_mcmc, pl_to_plot=1)
+
+# Optional axis controls
+transitp.plotTransit(phot, sol_mcmc, pl_to_plot=1, y1=0.997, y2=1.002, xdur_scale=2.0)
+
+# Continue MCMC if needed (using metadata)
+if 'x' in metadata and 'beta' in metadata:
+    lnprob, x_new, beta_new = tmcmc.genmcmcInput(sol_mcmc, params_to_fit)
+    chain2, accept2, burnin2 = tmcmc.demcmcRoutine(
+        x_new, beta_new, phot, sol_mcmc.to_array(), 
+        sol_mcmc.err_to_array(), metadata['params'], lnprob
+    )
+```
+
+**Note:** Requires `h5py` package. Install with `pip install h5py`.
 
 ---
 
